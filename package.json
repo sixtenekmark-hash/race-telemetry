@@ -1,0 +1,12 @@
+{
+  "name": "echook-telemetry",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Race telemetry dashboard for an eChook-equipped Greenpower car",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node tools/check.mjs data/race-2025-12-01.tsv"
+  },
+  "engines": { "node": ">=20.12" }
+}

@@ -1,0 +1,5 @@
+# secrets and private race data stay on this computer
+.env
+data/
+node_modules/
+.DS_Store

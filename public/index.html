@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Race Telemetry</title>
+  <meta name="description" content="Live eChook telemetry and energy pacing for the race car">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M7 21a9 9 0 0 1 18 0' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M16 21l5-6' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="vendor/uPlot.min.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <span class="title">Race Telemetry</span>
+  </div>
+  <div class="status">
+    <span id="modeBadge" class="badge">LIVE</span>
+    <span id="connDot" class="dot" aria-hidden="true"></span>
+    <span id="connText" class="muted">Connecting…</span>
+  </div>
+  <div class="clock">
+    <span class="muted small">Race time</span>
+    <span id="raceClock" class="mono">--:--</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="race" aria-selected="true">Race</button>
+    <button role="tab" data-tab="laps">Laps</button>
+    <button role="tab" data-tab="graphs">Graphs</button>
+    <button role="tab" data-tab="data">Data &amp; replay</button>
+    <button role="tab" data-tab="settings">Settings</button>
+  </nav>
+</header>
+
+<div id="replayBar" class="replaybar" hidden>
+  <button id="rpPlay" class="btn">Pause</button>
+  <select id="rpSpeed" class="btn" aria-label="Replay speed">
+    <option value="1">1×</option><option value="5">5×</option><option value="20" selected>20×</option><option value="60">60×</option><option value="200">200×</option>
+  </select>
+  <input id="rpSeek" type="range" min="0" max="1000" value="0" aria-label="Replay position">
+  <span id="rpTime" class="mono small">--:--</span>
+  <button id="rpLive" class="btn primary">Back to live</button>
+</div>
+
+<main>
+  <!-- RACE -->
+  <section id="tab-race" class="tab" role="tabpanel">
+    <div id="notice" class="notice" hidden></div>
+    <div class="hero">
+      <article id="paceCard" class="card pace">
+        <div class="pace-head">
+          <h2>Energy vs plan</h2>
+          <span id="paceSub" class="muted small"></span>
+        </div>
+        <div class="pace-main">
+          <div>
+            <div id="paceDelta" class="pace-delta">–</div>
+            <div id="paceCall" class="pace-call">Waiting for the race to start</div>
+          </div>
+          <div class="pace-gauge" aria-hidden="true">
+            <div class="pg-track"><div class="pg-band" id="pgBand"></div><div class="pg-zero"></div><div class="pg-mark" id="pgMark"></div></div>
+            <div class="pg-labels"><span>under plan · push</span><span>over plan · slow</span></div>
+          </div>
+        </div>
+        <div class="cap">
+          <div class="cap-bar" aria-hidden="true"><div id="capUsed" class="cap-used"></div><div id="capIdeal" class="cap-ideal"></div></div>
+          <div class="cap-legend small"><span id="capText" class="muted">0 / 20 Ah</span><span id="capIdealText" class="muted"></span></div>
+        </div>
+        <dl class="stats">
+          <div><dt>Hold for the rest</dt><dd id="stTargetA">–</dd></div>
+          <div><dt>Last 5 min average</dt><dd id="stRecentA">–</dd></div>
+          <div><dt>Projected at finish</dt><dd id="stProj">–</dd></div>
+          <div><dt>Plan per lap (reference track)</dt><dd id="stPerLap">–</dd></div>
+          <div><dt>Laps done</dt><dd id="stLaps">–</dd></div>
+          <div><dt>Δ by laps (same track only)</dt><dd id="stByLaps">–</dd></div>
+        </dl>
+      </article>
+
+      <article class="card lastlap">
+        <div class="pace-head"><h2 id="llTitle">Last lap</h2><span id="llSrc" class="muted small"></span></div>
+        <div id="llTime" class="ll-time">–</div>
+        <dl class="stats" id="llStats"></dl>
+      </article>
+    </div>
+
+    <div id="tiles" class="tiles"></div>
+
+    <div class="grid2">
+      <article class="card">
+        <div class="card-head"><h3>Δ Ah vs plan</h3><span class="muted small">above 0 = used more than plan</span></div>
+        <div id="chDelta" class="chart"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>Track</h3><span id="mapNote" class="muted small"></span></div>
+        <canvas id="map" class="map" aria-label="GPS track with the car's position"></canvas>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>Speed</h3><span class="muted small unitLabel"></span></div>
+        <div id="chSpeedR" class="chart"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>Current</h3><span class="muted small">A</span></div>
+        <div id="chCurrentR" class="chart"></div>
+      </article>
+    </div>
+
+    <article class="card">
+      <div class="card-head"><h3>Recent laps</h3><button class="link" data-goto="laps">All laps →</button></div>
+      <div class="tablewrap"><table id="lapsShort" class="laps"></table></div>
+    </article>
+  </section>
+
+  <!-- LAPS -->
+  <section id="tab-laps" class="tab" role="tabpanel" hidden>
+    <article class="card">
+      <div class="card-head"><h3>Laps</h3><span id="lapsNote" class="muted small"></span></div>
+      <div class="tablewrap"><table id="lapsFull" class="laps"></table></div>
+    </article>
+  </section>
+
+  <!-- GRAPHS -->
+  <section id="tab-graphs" class="tab" role="tabpanel" hidden>
+    <p class="muted small">Drag across a chart to zoom, double-click to reset. Hovering one chart shows the same moment on all of them.</p>
+    <div class="graphs" id="graphs"></div>
+  </section>
+
+  <!-- DATA -->
+  <section id="tab-data" class="tab" role="tabpanel" hidden>
+    <div class="grid2">
+      <article class="card">
+        <div class="card-head"><h3>eChook history</h3><span id="daysNote" class="muted small"></span></div>
+        <div id="days" class="days"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>eChook app CSV</h3></div>
+        <p class="muted small">Open a CSV or TSV exported from the eChook phone app. It stays on this device.</p>
+        <label class="btn file"><input id="csvFile" type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values">Choose file…</label>
+        <p id="csvNote" class="muted small"></p>
+      </article>
+    </div>
+    <article class="card" id="loadedCard" hidden>
+      <div class="card-head"><h3 id="loadedTitle">Loaded data</h3><span id="loadedNote" class="muted small"></span></div>
+      <div class="row">
+        <button id="btnReview" class="btn">Show whole session</button>
+        <button id="btnReplay" class="btn primary">Replay as if live</button>
+        <button id="btnRef" class="btn">Use as pacing reference</button>
+      </div>
+      <div id="runsList" class="runs"></div>
+      <div id="refResult" class="refbox" hidden></div>
+    </article>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab" role="tabpanel" hidden>
+    <div class="grid2">
+      <article class="card">
+        <div class="card-head"><h3>Energy plan</h3></div>
+        <div class="form">
+          <label>Target for the race <span><input id="sTarget" type="number" step="0.1" min="1"> Ah</span></label>
+          <label>Laps in the reference race <span><input id="sRefLaps" type="number" step="1" min="1"></span></label>
+          <label>Average lap in the reference race <span><input id="sRefLap" type="number" step="0.001" min="1"> s</span></label>
+          <label>Race length (blank = laps × average lap) <span><input id="sRaceLen" type="number" step="1" min="1" placeholder="auto"> min</span></label>
+          <label>“On pace” band <span>± <input id="sBand" type="number" step="0.05" min="0"> Ah</span></label>
+        </div>
+        <div id="planOut" class="planout"></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>Race start &amp; laps</h3></div>
+        <p class="muted small" id="startNote"></p>
+        <div class="row">
+          <button id="btnStartNow" class="btn primary">Race starts now</button>
+          <button id="btnStartAuto" class="btn">Detect automatically</button>
+        </div>
+        <div class="form">
+          <label>Or set the start time <span><input id="sStartAt" type="datetime-local" step="1"></span></label>
+          <label>Count laps with
+            <select id="sLapSrc"><option value="auto">Automatic</option><option value="counter">eChook lap counter</option><option value="gps">GPS start/finish line</option></select>
+          </label>
+        </div>
+        <div class="row">
+          <button id="btnGateHere" class="btn">Start/finish line at car's position</button>
+          <button id="btnGateAuto" class="btn">Line at race start</button>
+        </div>
+        <p class="muted small" id="gateNote"></p>
+      </article>
+      <article class="card">
+        <div class="card-head"><h3>Display &amp; warnings</h3></div>
+        <div class="form">
+          <label>Speed unit <select id="sUnits"><option value="mph">mph</option><option value="kmh">km/h</option><option value="ms">m/s</option></select></label>
+          <label>Theme <select id="sTheme"><option value="auto">Match device</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
+          <label>Pack voltage warning / critical below <span><input id="sVw" type="number" step="0.1"> / <input id="sVc" type="number" step="0.1"> V</span></label>
+          <label>Temperature warning / critical above <span><input id="sTw" type="number" step="1"> / <input id="sTc" type="number" step="1"> °C</span></label>
+          <label>Current warning / critical above <span><input id="sIw" type="number" step="1"> / <input id="sIc" type="number" step="1"> A</span></label>
+          <label>Battery imbalance warning above <span><input id="sImb" type="number" step="0.05"> V</span></label>
+        </div>
+      </article>
+      <article class="card" id="carIdCard">
+        <div class="card-head"><h3>Car ID</h3></div>
+        <p class="muted small" id="carIdNote"></p>
+        <div class="row" id="carIdRow">
+          <input id="sCarId" type="password" autocomplete="off" spellcheck="false" placeholder="eChook Car ID" aria-label="eChook Car ID">
+          <button id="btnCarId" class="btn primary">Save on this device</button>
+        </div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<script src="vendor/uPlot.iife.min.js"></script>
+<script src="vendor/socket.io.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

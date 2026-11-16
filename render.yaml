@@ -1,0 +1,16 @@
+# Render blueprint: full version (server keeps the Car ID, eChook history works).
+services:
+  - type: web
+    name: race-telemetry
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: CAR_ID
+        sync: false
+      - key: SITE_PASSWORD
+        sync: false
+      - key: NODE_VERSION
+        value: "22"
