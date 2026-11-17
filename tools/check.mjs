@@ -15,14 +15,16 @@ if (csvPath) {
   console.log(`Ah per lap ${ref.perLap.toFixed(4)}  Ah/s ${ref.perS.toExponential(5)}  Ah/ms ${ref.perMs.toExponential(5)}  ideal current ${(ref.perMs * 3.6e6).toFixed(2)} A`);
   console.log(`Ah used in race window ${ref.usedTotal?.toFixed(2)}, logged final ${S[S.length - 1].ah}`);
   console.log(`lap Ah: ${ref.res.laps.map((l) => l.ah.toFixed(2)).join(' ')}`);
-  // Pace indicator over the race with the plan derived from this race
-  const plan = M.makePlan({ targetAh: 20, refLaps: ref.laps, refLapMs: ref.avgLapMs });
-  const line = [];
-  for (let m = 5; m <= 85; m += 5) {
-    const r = M.analyze(S, { plan, pick: 'longest', nowT: S[0].t + m * 60e3 });
-    if (r.cap) line.push(`${m}m:${r.cap.delta >= 0 ? '+' : ''}${r.cap.delta.toFixed(2)}`);
+  // Delta (actual - ideal) through the race for each ideal model
+  for (const [name, model] of [['C(t,n)', 'tn'], ['C(t)', 't'], ['reference', 'ref']]) {
+    const plan = M.makePlan({ targetAh: 20, refLaps: ref.laps, refLapMs: ref.avgLapMs, idealModel: model });
+    const line = [];
+    for (let m = 5; m <= 85; m += 5) {
+      const r = M.analyze(S, { plan, pick: 'longest', nowT: S[0].t + m * 60e3 });
+      if (r.cap) line.push(`${m}m:${r.cap.delta >= 0 ? '+' : ''}${r.cap.delta.toFixed(2)}`);
+    }
+    console.log(`delta vs ${name}:`.padEnd(20), line.join(' '));
   }
-  console.log('delta vs plan:', line.join(' '));
 }
 
 if (jsonPath) {

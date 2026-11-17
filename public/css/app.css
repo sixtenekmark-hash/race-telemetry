@@ -150,6 +150,8 @@ input[type=number], input[type=password], input[type=text], input[type=datetime-
   font: inherit; color: var(--ink); background: var(--surface-2); border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px; }
 input[type=number] { width: 92px; text-align: right; }
 #sCarId { flex: 1; min-width: 180px; }
+.coef { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 14px; padding: 8px 10px; border-radius: 9px; background: var(--surface-2); }
+.coef input[type=number] { width: 78px; background: var(--surface); }
 .planout { margin-top: 14px; padding: 12px; border-radius: 10px; background: var(--surface-2); font-size: 13.5px; display: grid; grid-template-columns: auto auto; gap: 4px 16px; }
 .planout b { font-weight: 650; text-align: right; font-variant-numeric: tabular-nums; }
 

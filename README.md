@@ -3,28 +3,54 @@
 A live dashboard for the car's eChook logger, built for the person on the pit wall
 who tells the drivers when to speed up and when to slow down.
 
-## The energy plan
+## The ideal Ah
 
-The main number on the **Race** tab compares the amp-hours used so far with the plan:
+The main number on the **Race** tab compares the amp-hours used so far with an ideal.
+Choose the ideal in **Settings → Energy plan**. The coefficients can be edited there.
+
+| Model | Ideal Ah | t and n |
+|---|---|---|
+| **C(t, n)** (default) | 0.12 + 0.137t + 0.249n | t = minutes since the race start; n = laps completed (0 on lap 1) |
+| **C(t)** | 0.14 + 0.2388t | t = minutes since the race start |
+| **Reference race** | 20 Ah ÷ 33 laps ÷ 149.070 s × time | the original method, described below |
+
+Settings can switch n to "the lap in progress" (1 on lap 1), which raises the ideal by 0.249 Ah throughout.
+
+The dashboard shows **actual − ideal** as **+x Ah** or **−x Ah**:
+- **+** means more was used than the ideal: **SLOW DOWN**.
+- **−** means less was used: **SPEED UP**.
+- Within ± the band (0.2 Ah by default): **ON PACE**.
+
+The laps table and last-lap card compare each lap with how much the ideal grows over a lap of
+that length:
+
+| Model | Ideal for one lap |
+|---|---|
+| C(t, n) | 0.137 × lap minutes + 0.249 |
+| C(t) | 0.2388 × lap minutes |
+| Reference race | 0.6061 Ah |
+
+Checked against the 1 Dec 2025 race:
+- C(t) is exactly the least-squares fit of the app's AmpHours against minutes since the log started.
+- With C(t, n), Δ Ah at each lap line stayed between −0.19 and +0.01 Ah.
+- Within a lap, C(t, n) swings by about 0.3 Ah. The ideal grows only 0.137 Ah/min between lines,
+  then steps up 0.249 Ah at each line. Read it at the line, or use C(t) for a steadier mid-lap call.
+
+The **Hold for the rest** figure is the steady current that would use exactly the rest of the
+20 Ah target in the time left in the race plan.
+
+### Reference race method
 
 1. Target for a race: **20 Ah**.
 2. Reference race (1 Dec 2025, eChook app CSV): **33 complete laps**, counted from GPS.
 3. Ah per lap = 20 ÷ 33 = **0.6061 Ah**.
-4. Average lap = **149.070 s** (149 070 ms), including the two pit stops.
+4. Average lap = **149.070 s**, including the two pit stops.
 5. Ah per second = 0.6061 ÷ 149.070 = **0.0040656 Ah/s** = 4.0656 × 10⁻⁶ Ah/ms
-   (the same as a steady 14.64 A). The plan covers 33 × 149.070 s = 81 min 59 s.
+   (the same as a steady 14.64 A). This covers 33 × 149.070 s = 81 min 59 s, which is also the
+   race length used for "hold for the rest" unless one is set.
 6. The ideal at any moment is that rate × the time since the race started.
-   The dashboard shows **actual − ideal** as **+x Ah** or **−x Ah**:
-   - **+** means more was used than planned: **SLOW DOWN**.
-   - **−** means less was used than planned: **SPEED UP**.
-   - Within ± the band (0.2 Ah by default): **ON PACE**.
 
-The **Hold for the rest** figure is the steady current that would use exactly the rest of the
-20 Ah in the time that's left. In the 1 Dec race the team was within 0.05 Ah of this plan for
-the first 30 minutes.
-
-All of these values can be changed in **Settings**. **Data & replay → Use as pacing reference**
-redoes the calculation from any race log.
+**Data & replay → Use as pacing reference** redoes steps 2–5 from any race log.
 
 ## Last lap summary
 

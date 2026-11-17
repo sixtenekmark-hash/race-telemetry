@@ -11,8 +11,10 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
 };
 
-// Defaults come from the team's reference race (1 Dec 2025): 33 laps, 149.070 s average, 20 Ah target.
+// Ideal Ah: C(t, n) = 0.12 + 0.137t + 0.249n by default; C(t) = 0.14 + 0.2388t, or the reference-race rate
+// (1 Dec 2025: 33 laps, 149.070 s average, 20 Ah target) as alternatives.
 const DEFAULTS = {
+  idealModel: 'tn', tnA: 0.12, tnB: 0.137, tnC: 0.249, nMode: 'done', tA: 0.14, tB: 0.2388,
   targetAh: 20, refLaps: 33, refLapMs: 149070, raceLenMin: null, bandAh: 0.2,
   units: 'mph', theme: 'auto', lapSource: 'auto', liveStart: null, gate: null,
   vWarn: 18, vCrit: 14, tWarn: 55, tCrit: 65, iWarn: 40, iCrit: 120, imbWarn: 0.5,
@@ -132,17 +134,17 @@ function renderPace(plan) {
   const set = (id, v) => { $(id).innerHTML = v; };
   if (!c) {
     set('paceDelta', '–'); $('paceCall').className = 'pace-call'; $('paceCall').textContent = 'Waiting for the race to start';
-    $('paceSub').textContent = `Plan: ${fx(plan.targetAh, 1)} Ah over ${clock(plan.raceLenMs)}`;
+    $('paceSub').textContent = `Ideal: ${modelFormula(plan)}`;
     $('pgMark').style.left = '50%'; $('capUsed').style.width = '0%'; $('capIdeal').style.left = '0%';
     $('capText').textContent = `0 of ${fx(plan.targetAh, 1)} Ah used`; $('capIdealText').textContent = '';
     for (const id of ['stTargetA', 'stRecentA', 'stProj', 'stLaps', 'stByLaps']) set(id, '–');
-    set('stPerLap', `${fx(plan.perLap, 3)}${U('Ah')}`);
+    set('stPerLap', `${fx(plan.avgLapAh, 3)}${U('Ah')}`);
     return;
   }
   set('paceDelta', `${signed(c.delta)}${U('Ah')}`);
   const call = { slow: '▼ SLOW DOWN', hold: '✓ ON PACE', push: '▲ SPEED UP' }[c.call];
   $('paceCall').className = 'pace-call ' + c.call; $('paceCall').textContent = call;
-  $('paceSub').textContent = `${fx(c.used, 2)} Ah used, plan ${fx(c.ideal, 2)} Ah at ${clock(c.elapsed)}`;
+  $('paceSub').textContent = `${fx(c.used, 2)} Ah used, ideal ${fx(c.ideal, 2)} Ah at ${clock(c.elapsed)}${c.nUsed != null ? `, n = ${c.nUsed}` : ''}`;
   const R = Math.max(1, settings.bandAh * 4);
   $('pgMark').style.left = `${50 + Math.max(-1, Math.min(1, c.delta / R)) * 50}%`;
   const bw = (settings.bandAh / R) * 50;
@@ -150,11 +152,11 @@ function renderPace(plan) {
   $('capUsed').style.width = `${Math.min(100, (c.used / plan.targetAh) * 100)}%`;
   $('capIdeal').style.left = `${Math.min(100, (c.ideal / plan.targetAh) * 100)}%`;
   $('capText').textContent = `${fx(c.used, 2)} of ${fx(plan.targetAh, 1)} Ah used (${Math.round(c.pctUsed * 100)}%)`;
-  $('capIdealText').textContent = c.remainingMs > 0 ? `Black mark = plan now · ${clock(c.remainingMs)} of plan left` : 'Planned race length reached';
+  $('capIdealText').textContent = c.remainingMs > 0 ? `Black mark = ideal now · ${clock(c.remainingMs)} of the race plan left` : 'Planned race length reached';
   set('stTargetA', c.targetRestA != null ? `${fx(c.targetRestA, 1)}${U('A')}` : '–');
   set('stRecentA', c.recentA != null ? `${fx(c.recentA, 1)}${U('A')}` : '–');
   set('stProj', c.projected != null ? `${fx(c.projected, 1)}${U('Ah')}` : '–');
-  set('stPerLap', `${fx(plan.perLap, 3)}${U('Ah')}`);
+  set('stPerLap', `${fx(plan.avgLapAh, 3)}${U('Ah')}`);
   set('stLaps', String(c.lapsDone));
   set('stByLaps', c.deltaByLaps != null ? `<span class="${dcls(c.deltaByLaps)}">${signed(c.deltaByLaps)}</span>${U('Ah')}` : '–');
 }
@@ -253,8 +255,24 @@ function columns(S, a, b, fns) {
   return [x, ...ys];
 }
 const usedAt = (j) => (res?.i0 != null && j >= res.i0 ? res.used[j] : null);
-const idealAt = (plan) => (s, j) => (res?.i0 != null && j >= res.i0 ? plan.perMs * (s.t - res.t0) : null);
-const deltaAt = (plan) => (s, j) => { const u = usedAt(j); return u == null ? null : u - plan.perMs * (s.t - res.t0); };
+// Ideal at each sample. C(t, n) needs the laps completed at that moment, so walk the lap end times
+// alongside the samples (columns() visits them in time order).
+const idealAt = (plan) => {
+  const ends = (res?.laps || []).map((l) => l.tb);
+  let p = 0;
+  return (s, j) => {
+    if (res?.i0 == null || j < res.i0) return null;
+    while (p < ends.length && ends[p] <= s.t) p++;
+    return M.idealAh(plan, s.t - res.t0, p);
+  };
+};
+const deltaAt = (plan) => {
+  const ideal = idealAt(plan);
+  return (s, j) => { const id = ideal(s, j), u = usedAt(j); return id == null || u == null ? null : u - id; };
+};
+const modelFormula = (p) => (p.model === 'tn' ? `C(t, n) = ${p.coef.a} + ${p.coef.b}t + ${p.coef.c}n`
+  : p.model === 't' ? `C(t) = ${p.coef.a} + ${p.coef.b}t`
+    : `${fx(p.targetAh, 1)} Ah ÷ ${p.refLaps} laps ÷ ${(p.refLapMs / 1000).toFixed(3)} s per lap`);
 
 function renderRaceCharts(S, plan, k) {
   const w = chartWindow(S, k);
@@ -270,8 +288,8 @@ function renderRaceCharts(S, plan, k) {
 }
 
 const GRAPHS = [
-  { id: 'gUsed', title: 'Ah used vs plan', unit: 'Ah', dp: 2, series: [{ label: 'Used', color: '--s1' }, { label: 'Plan', color: '--s2', dash: [6, 4] }], cols: (plan) => [(s, j) => usedAt(j), idealAt(plan)] },
-  { id: 'gDelta', title: 'Δ Ah vs plan', unit: 'Ah', dp: 2, delta: true, series: [{ label: 'Δ Ah' }], cols: (plan) => [deltaAt(plan)] },
+  { id: 'gUsed', title: 'Ah used vs ideal', unit: 'Ah', dp: 2, series: [{ label: 'Used', color: '--s1' }, { label: 'Ideal', color: '--s2', dash: [6, 4] }], cols: (plan) => [(s, j) => usedAt(j), idealAt(plan)] },
+  { id: 'gDelta', title: 'Δ Ah vs ideal', unit: 'Ah', dp: 2, delta: true, series: [{ label: 'Δ Ah' }], cols: (plan) => [deltaAt(plan)] },
   { id: 'gSpeed', title: 'Speed', unit: spdUnit, dp: 1, series: [{ label: 'Wheel', color: '--s1' }, { label: 'GPS', color: '--s2' }], cols: () => [(s) => spd(s.spd), (s) => spd(s.gspd)] },
   { id: 'gCurrent', title: 'Current', unit: 'A', dp: 1, series: [{ label: 'Current', color: '--s1' }], cols: () => [(s) => s.i] },
   { id: 'gPower', title: 'Power', unit: 'W', dp: 0, series: [{ label: 'Power', color: '--s1' }], cols: () => [(s) => s.pw] },
@@ -305,9 +323,9 @@ function renderMap(S, k) {
 
 function renderLaps(table, S, plan, k, max) {
   const u = spdUnit();
-  const head = ['Lap', 'Time', 'vs plan', 'Ah', 'Δ Ah', 'Avg A', 'Peak A', 'Avg V', 'Min V', `Speed ${u}`, `GPS ${u}`, 'RPM', 'Throttle %', 'Wh', 'Max °C'];
+  const head = ['Lap', 'Time', 'vs ref lap', 'Ah', 'Δ Ah', 'Avg A', 'Peak A', 'Avg V', 'Min V', `Speed ${u}`, `GPS ${u}`, 'RPM', 'Throttle %', 'Wh', 'Max °C'];
   const laps = res?.laps || [];
-  if (table === $('lapsFull')) $('lapsNote').textContent = laps.length ? `${laps.length} laps · ${lapSourceText(S)} · plan ${fx(plan.perLap, 3)} Ah and ${fx(plan.refLapMs / 1000, 1)} s per lap` : '';
+  if (table === $('lapsFull')) $('lapsNote').textContent = laps.length ? `${laps.length} laps · ${lapSourceText(S)} · Δ Ah = lap Ah − ideal for a lap of that length (${modelFormula(plan)}) · vs ref lap = lap time − the reference average lap (${fx(plan.refLapMs / 1000, 1)} s)` : '';
   if (!laps.length && !(res?.bounds?.length)) { table.innerHTML = `<tr><td class="muted">No laps yet</td></tr>`; return; }
   const best = laps.length ? laps.reduce((m, l) => (l.dur < m.dur ? l : m)) : null;
   const rows = [];
@@ -331,6 +349,8 @@ function renderLaps(table, S, plan, k, max) {
 
 // ---------- settings ----------
 const FIELDS = [
+  ['sModel', 'idealModel', String], ['sNMode', 'nMode', String],
+  ['sTnA', 'tnA', Number], ['sTnB', 'tnB', Number], ['sTnC', 'tnC', Number], ['sTA', 'tA', Number], ['sTB', 'tB', Number],
   ['sTarget', 'targetAh', Number], ['sRefLaps', 'refLaps', Number],
   ['sRefLap', 'refLapMs', (v) => Math.round(Number(v) * 1000), (v) => (v / 1000).toFixed(3)],
   ['sRaceLen', 'raceLenMin', (v) => (v === '' ? null : Number(v)), (v) => (v == null ? '' : v)],
@@ -340,10 +360,28 @@ const FIELDS = [
 ];
 function fillSettings() {
   for (const [id, key, , show] of FIELDS) $(id).value = show ? show(settings[key]) : settings[key];
+  syncModelRows();
   renderPlanOut();
+}
+function syncModelRows() {
+  document.querySelectorAll('[data-model]').forEach((el) => { el.hidden = !el.dataset.model.split(' ').includes(settings.idealModel); });
 }
 function renderPlanOut() {
   const p = M.makePlan(settings);
+  if (p.model !== 'ref') {
+    const lapMin = p.refLapMs / 60000;
+    const rows = [
+      ['Ideal now', modelFormula(p)],
+      p.model === 'tn' ? ['n', p.nMode === 'current' ? 'the lap in progress (1 on lap 1)' : 'laps completed (0 on lap 1)'] : null,
+      p.model === 'tn'
+        ? ['Ideal grows', `${p.coef.b} Ah/min (a steady ${(p.coef.b * 60).toFixed(2)} A) during a lap, plus ${p.coef.c} Ah at each lap line`]
+        : ['Ideal grows', `${p.coef.b} Ah/min (a steady ${(p.coef.b * 60).toFixed(2)} A)`],
+      ['Ideal for an average lap', `${p.coef.b} × ${lapMin.toFixed(4)} min${p.model === 'tn' ? ` + ${p.coef.c}` : ''} = ${p.avgLapAh.toFixed(4)} Ah`],
+      ['Ideal at the end of the race plan', `${M.idealAh(p, p.raceLenMs, p.refLaps).toFixed(2)} Ah after ${clock(p.raceLenMs)}${p.model === 'tn' ? ` and ${p.refLaps} laps` : ''}`],
+    ].filter(Boolean);
+    $('planOut').innerHTML = rows.map(([a, b]) => `<span>${a}</span><b>${b}</b>`).join('');
+    return;
+  }
   const rows = [
     ['Ah per lap', `${fx(p.targetAh, 1)} ÷ ${p.refLaps} = ${p.perLap.toFixed(4)} Ah`],
     ['Average lap', `${(p.refLapMs / 1000).toFixed(3)} s = ${p.refLapMs} ms`],
@@ -543,7 +581,8 @@ $('btnRef').onclick = () => {
     `Average lap ${(r.avgLapMs / 1000).toFixed(3)} s · ${fx(settings.targetAh, 1)} Ah ÷ ${r.laps} = <b>${r.perLap.toFixed(4)} Ah per lap</b> · ` +
     `${r.perS.toFixed(7)} Ah per second · ${(r.perMs * 1e6).toFixed(5)} × 10⁻⁶ Ah per ms (a steady ${(r.perMs * 3.6e6).toFixed(2)} A).<br>` +
     `<span class="muted">Actually used over those laps: ${fx(r.res.used[r.res.i1], 2)} Ah.</span>` +
-    `<div class="row"><button class="btn primary" id="btnApplyRef">Use these numbers for the plan</button></div>`;
+    `<br><span class="muted">Applying them sets the reference-race model (one of the ideal Ah choices in Settings) and the race length used for “hold for the rest”.</span>` +
+    `<div class="row"><button class="btn primary" id="btnApplyRef">Use these numbers</button></div>`;
   $('btnApplyRef').onclick = () => {
     Object.assign(settings, { refLaps: r.laps, refLapMs: Math.round(r.avgLapMs), raceLenMin: null });
     saveSettings(); fillSettings(); invalidate();
@@ -588,6 +627,7 @@ for (const [id, key, parse] of FIELDS) {
     if (typeof v === 'number' && !Number.isFinite(v)) return;
     settings[key] = v; saveSettings();
     if (key === 'theme') applyTheme();
+    if (key === 'idealModel') syncModelRows();
     if (key === 'units') Object.values(charts).forEach((c) => c.rebuild());
     renderPlanOut(); invalidate();
   });

@@ -198,7 +198,34 @@ export function makePlan(st) {
   const perLap = targetAh / refLaps;
   const raceLenMs = st.raceLenMin ? st.raceLenMin * 60e3 : refLaps * refLapMs;
   const perMs = targetAh / raceLenMs;
-  return { targetAh, refLaps, refLapMs, perLap, raceLenMs, perMs, perS: perMs * 1e3, perMin: perMs * 6e4, idealA: perMs * 3.6e6 };
+  const numOr = (v, d) => (v === null || v === undefined || v === '' || !Number.isFinite(+v) ? d : +v);
+  const model = ['tn', 't', 'ref'].includes(st.idealModel) ? st.idealModel : 'tn';
+  const coef = model === 'tn' ? { a: numOr(st.tnA, 0.12), b: numOr(st.tnB, 0.137), c: numOr(st.tnC, 0.249) }
+    : model === 't' ? { a: numOr(st.tA, 0.14), b: numOr(st.tB, 0.2388), c: 0 } : null;
+  const plan = {
+    targetAh, refLaps, refLapMs, perLap, raceLenMs, perMs, perS: perMs * 1e3, perMin: perMs * 6e4, idealA: perMs * 3.6e6,
+    model, coef, nMode: st.nMode === 'current' ? 'current' : 'done',
+  };
+  plan.avgLapAh = idealLapAh(plan, refLapMs);
+  return plan;
+}
+
+/**
+ * Ideal amp-hours used `ms` after the race start, with `done` laps completed.
+ *  'tn':  C(t, n) = a + b·t + c·n   (t in minutes; n = laps completed, or the lap in progress if nMode is 'current')
+ *  't':   C(t)    = a + b·t
+ *  'ref': target Ah ÷ planned race length × time (20 Ah ÷ 33 laps ÷ 149.07 s from the reference race)
+ */
+export function idealAh(plan, ms, done = 0) {
+  if (plan.model === 'ref') return plan.perMs * ms;
+  const n = plan.model === 'tn' ? done + (plan.nMode === 'current' ? 1 : 0) : 0;
+  return plan.coef.a + plan.coef.b * (ms / 60000) + plan.coef.c * n;
+}
+
+/** Ideal amp-hours for one lap lasting `durMs`: how much the ideal grows over that lap. */
+export function idealLapAh(plan, durMs) {
+  if (plan.model === 'ref') return plan.perLap;
+  return plan.coef.b * (durMs / 60000) + plan.coef.c;
 }
 
 // ---------- laps ----------
@@ -292,7 +319,8 @@ export function lapStats(S, bounds, used, plan) {
     const ah = used ? lerpAt(S, used, tb) - lerpAt(S, used, ta) : null;
     const wh = lerpAt(S, whArr, tb) - lerpAt(S, whArr, ta);
     laps.push({
-      n, ta, tb, dur: tb - ta, ah, ahDelta: ah != null && plan ? ah - plan.perLap : null,
+      n, ta, tb, dur: tb - ta, ah, idealAh: plan ? idealLapAh(plan, tb - ta) : null,
+      ahDelta: ah != null && plan ? ah - idealLapAh(plan, tb - ta) : null,
       avgI: avg('i'), avgV: avg('v'), minV, avgSpd: avg('spd'), avgGspd: avg('gspd'), avgRpm: avg('rpm'), avgThr: avg('thr'),
       peakI, peakW, maxT, wh, dist, samples: z - a, device: ll,
     });
@@ -343,7 +371,7 @@ export function analyze(S, opts) {
 
 export function capacity(S, res, plan, k, band) {
   const s = S[k], elapsed = s.t - res.t0, used = res.used[k] ?? 0;
-  const ideal = plan.perMs * elapsed, delta = used - ideal;
+  const ideal = idealAh(plan, elapsed, res.laps.length), delta = used - ideal;
   const remainingMs = Math.max(0, plan.raceLenMs - elapsed);
   // recent consumption: last 5 minutes
   let j = k; while (j > res.i0 && s.t - S[j - 1].t <= 5 * 60e3) j--;
@@ -357,7 +385,8 @@ export function capacity(S, res, plan, k, band) {
     call: delta > band ? 'slow' : delta < -band ? 'push' : 'hold',
     targetRestA: remainingMs > 60e3 ? ((plan.targetAh - used) / remainingMs) * 3.6e6 : null,
     projected: recentA != null ? used + (recentA * remainingMs) / 3.6e6 : null,
-    lapsDone, idealByLaps: lapsDone * plan.perLap, deltaByLaps: usedAtLap != null ? usedAtLap - lapsDone * plan.perLap : null,
+    lapsDone, nUsed: plan.model === 'tn' ? lapsDone + (plan.nMode === 'current' ? 1 : 0) : null,
+    deltaByLaps: usedAtLap != null ? usedAtLap - res.laps.reduce((sum, l) => sum + idealLapAh(plan, l.dur), 0) : null,
     pctUsed: used / plan.targetAh,
   };
 }
