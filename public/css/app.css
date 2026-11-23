@@ -125,7 +125,16 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; display: block; }
 .u-legend { font-size: 12.5px; color: var(--ink-2); }
 .u-legend .u-marker { border-radius: 2px; }
 .u-select { background: color-mix(in srgb, var(--accent) 15%, transparent); }
-.map { width: 100%; height: 300px; display: block; border-radius: 10px; background: var(--surface-2); }
+.map { width: 100%; height: 360px; display: block; border-radius: 10px; background: var(--surface-2); overflow: hidden; z-index: 0; }
+.mapbtns a { font-size: 17px; line-height: 30px !important; text-align: center; color: #222 !important; }
+.mapbtns a.on { background: #3987e5 !important; color: #fff !important; }
+.leaflet-popup-content { font: 13px/1.45 system-ui, sans-serif; }
+.racebar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
+.racebar .lapbtn { min-width: 110px; font-size: 16px; }
+kbd { font: 600 11px system-ui, sans-serif; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--axis); color: var(--muted); }
+.btn.primary kbd { color: #fff; border-color: #fff8; }
+.syncnote { margin-left: auto; }
+.syncnote.ok { color: var(--good); } .syncnote.off { color: var(--critical); }
 
 /* tables */
 .tablewrap { overflow-x: auto; }

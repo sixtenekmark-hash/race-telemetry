@@ -157,39 +157,50 @@ export function detectRuns(S, { restMs = 5 * 60e3, minRunMs = 60e3 } = {}) {
 }
 
 // ---------- capacity ----------
-/** Race-relative amp-hours used, robust to counter resets and spikes. Returns array aligned with S (null before start). */
+/**
+ * Amp-hours used, as the eChook shows it: its own Ah counter, unchanged. If the counter falls back to
+ * zero after the race start (the phone app restarted), the earlier total is carried over.
+ * Logs without an Ah counter fall back to integrating current from i0.
+ */
 export function usedAhSeries(S, i0) {
   const out = new Array(S.length).fill(null);
-  let used = 0, prev = null, prevT = null;
-  const haveAh = S.slice(i0).some((s) => s.ah != null && s.ah > 0);
-  // Dense logs (eChook app CSV, 4 Hz) store Ah rounded to 0.1, so integrating current is more precise there.
-  const gaps = [];
-  for (let k = i0 + 1; k < Math.min(S.length, i0 + 400); k++) gaps.push(S[k].t - S[k - 1].t);
-  gaps.sort((a, b) => a - b);
-  const dense = gaps.length > 10 && gaps[gaps.length >> 1] <= 1000 && S.slice(i0, i0 + 400).some((s) => s.i != null);
-  out.mode = !haveAh || dense ? 'integrated current' : 'eChook Ah counter';
-  for (let k = i0; k < S.length; k++) {
-    const s = S[k];
-    if (!haveAh || dense) { // integrate current
-      if (k > i0 && s.i != null) {
-        const dt = (s.t - S[k - 1].t) / 3.6e6;
-        if (dt > 0 && dt < 30 / 3600) used += Math.max(0, s.i) * dt;
-      }
-      out[k] = used; continue;
-    }
-    const a = s.ah;
-    if (a != null) {
-      if (prev == null) { prev = a; prevT = s.t; }
-      else {
-        const d = a - prev, maxStep = (250 * (s.t - prevT)) / 3.6e6 + 0.15;
-        if (d >= 0 && d <= maxStep) { used += d; prev = a; prevT = s.t; }
-        else if (d < 0 && a < 0.3) { used += a; prev = a; prevT = s.t; } // logger restarted from zero
-        // otherwise: spike or noise, ignore
-      }
+  if (!S.some((s) => s.ah != null && s.ah > 0)) {
+    const integ = integratedSeries(S, i0);
+    integ.mode = 'integrated current';
+    return integ;
+  }
+  out.mode = 'eChook Ah counter';
+  let carry = 0, last = null;
+  for (let k = 0; k < S.length; k++) {
+    const a = S[k].ah;
+    if (a == null) { out[k] = last == null ? null : last + carry; continue; }
+    if (i0 != null && k >= i0 && last != null && last > 0.5 && a < 0.3) carry += last; // restarted mid-race
+    last = a;
+    out[k] = a + carry;
+  }
+  return out;
+}
+
+/** Area under the current curve from i0 (null before). */
+export function integratedSeries(S, i0) {
+  const out = new Array(S.length).fill(null);
+  let used = 0;
+  for (let k = Math.max(0, i0 ?? 0); k < S.length; k++) {
+    if (k > i0 && S[k].i != null) {
+      const dt = (S[k].t - S[k - 1].t) / 3.6e6;
+      if (dt > 0 && dt < 30 / 3600) used += Math.max(0, S[k].i) * dt;
     }
     out[k] = used;
   }
   return out;
+}
+
+/** True for logs sampled at least once a second (the phone app's CSV, 4 per second). */
+function isDense(S, i0) {
+  const g = [];
+  for (let k = Math.max(1, i0 + 1); k < Math.min(S.length, i0 + 400); k++) g.push(S[k].t - S[k - 1].t);
+  g.sort((x, y) => x - y);
+  return g.length > 10 && g[g.length >> 1] <= 1000;
 }
 
 /** The pacing plan, exactly as defined by the team: Ah per lap = target / laps, then per second / ms. */
@@ -330,63 +341,82 @@ export function lapStats(S, bounds, used, plan) {
 
 // ---------- whole-session analysis ----------
 /**
- * opts: { plan, raceStart (ms|null), pick: 'latest'|'longest', lapSource: 'auto'|'counter'|'gps', gate, nowT, bandAh }
+ * opts: { plan, raceStart (ms|null), pick: 'latest'|'longest', lapSource: 'auto'|'counter'|'gps', gate,
+ *         nowT (replay position), wallNow (live: the real time now), manualLaps (lap times; when any exist,
+ *         they replace automatic lap counting), bandAh }
  */
 export function analyze(S, opts) {
   const res = { runs: [], i0: null, i1: null, t0: null, bounds: [], laps: [], lapSource: null, gate: null, used: null, cap: null };
   if (!S.length) return res;
   const nowIdx = opts.nowT == null ? S.length - 1 : Math.max(0, lowerIdx(S, opts.nowT + 1) - 1);
   res.runs = detectRuns(S.slice(0, nowIdx + 1));
-  let i0;
-  if (opts.raceStart != null && opts.raceStart >= S[0].t && opts.raceStart <= S[nowIdx].t) i0 = lowerIdx(S, opts.raceStart);
+  let t0 = null, run = null;
+  if (opts.raceStart != null) t0 = opts.raceStart; // takes effect at once, even before the next packet
   else if (res.runs.length) {
-    const r = opts.pick === 'longest' ? res.runs.reduce((a, b) => (b.dur > a.dur ? b : a)) : res.runs[res.runs.length - 1];
-    i0 = r.i0;
-  } else i0 = null;
-  if (i0 == null) return res;
-  const run = res.runs.find((r) => r.i0 <= i0 && i0 <= r.i1);
-  const i1 = opts.pick === 'longest' && run && opts.raceStart == null ? Math.min(nowIdx, run.i1 + 30) : nowIdx;
-  Object.assign(res, { i0, i1, t0: S[i0].t });
-  res.used = usedAhSeries(S, i0);
-
-  const counter = counterBoundaries(S, i0, i1);
-  const gate = opts.gate || autoGate(S, i0, i1);
-  const useCounter = opts.lapSource === 'counter' || (opts.lapSource !== 'gps' && counter.length >= 2);
-  res.gate = gate;
-  if (useCounter) { res.bounds = [{ k: i0, t: S[i0].t, src: 'start' }, ...counter]; res.lapSource = 'counter'; }
-  else {
-    let b = gpsBoundaries(S, i0, i1, gate);
-    // If the car starts at the gate (normal for a race start), the start itself begins lap 1.
-    let f = i0; while (f <= i1 && !hasFix(S[f]) && S[f].t - S[i0].t < 30e3) f++;
-    if (gate && f <= i1 && hasFix(S[f]) && distM(S[f], gate) < 30) {
-      b = b.filter((x) => x.t - S[i0].t > 20e3);
-      b.unshift({ k: i0, t: S[i0].t, src: 'start' });
-    }
-    res.bounds = b; res.lapSource = 'gps';
+    run = opts.pick === 'longest' ? res.runs.reduce((a, b) => (b.dur > a.dur ? b : a)) : res.runs[res.runs.length - 1];
+    t0 = S[run.i0].t;
   }
-  res.laps = lapStats(S, res.bounds, res.used, opts.plan);
-  res.cap = capacity(S, res, opts.plan, i1, opts.bandAh ?? 0.2);
+  if (t0 == null) { res.echook = usedAhSeries(S, null); return res; }
+  const i0 = Math.min(lowerIdx(S, t0), nowIdx);
+  const i1 = run && opts.pick === 'longest' ? Math.min(nowIdx, run.i1 + 30) : nowIdx;
+  const nowT = opts.wallNow ?? opts.nowT ?? S[i1].t;
+  Object.assign(res, { i0, i1, t0 });
+  // echook: the eChook's own Ah counter. used: Ah since the race start (resets when the race is restarted).
+  res.echook = usedAhSeries(S, i0);
+  const base = lerpAt(S, res.echook, t0) ?? 0;
+  res.used = res.echook.map((v, k) => (v == null || k < i0 ? null : Math.max(0, v - base)));
+  res.used.mode = res.echook.mode;
+  const lapAh = isDense(S, i0) && S.some((s) => s.i != null) ? integratedSeries(S, i0) : res.used;
+  const start = { k: i0, t: t0, src: 'start' };
+
+  const manual = (opts.manualLaps || []).filter((t) => t > t0 && t <= nowT).sort((a, b) => a - b);
+  const gate = opts.gate || autoGate(S, i0, i1);
+  res.gate = gate;
+  if (manual.length) {
+    res.bounds = [start, ...manual.map((t) => ({ k: lowerIdx(S, t), t, src: 'manual' }))];
+    res.lapSource = 'manual';
+  } else {
+    const counter = counterBoundaries(S, i0, i1).filter((b) => b.t > t0);
+    if (opts.lapSource === 'counter' || (opts.lapSource !== 'gps' && counter.length >= 2)) {
+      res.bounds = [start, ...counter]; res.lapSource = 'counter';
+    } else {
+      let b = gpsBoundaries(S, i0, i1, gate).filter((x) => x.t > t0);
+      // If the car starts at the gate (normal for a race start), the start itself begins lap 1.
+      let f = i0; while (f <= i1 && !hasFix(S[f]) && S[f].t - t0 < 30e3) f++;
+      if (gate && f <= i1 && hasFix(S[f]) && distM(S[f], gate) < 30) {
+        b = b.filter((x) => x.t - t0 > 20e3);
+        b.unshift(start);
+      }
+      res.bounds = b; res.lapSource = 'gps';
+    }
+  }
+  res.laps = lapStats(S, res.bounds, lapAh, opts.plan);
+  res.cap = capacity(S, res, opts.plan, i1, opts.bandAh ?? 0.2, nowT);
   return res;
 }
 
-export function capacity(S, res, plan, k, band) {
-  const s = S[k], elapsed = s.t - res.t0, used = res.used[k] ?? 0;
+export function capacity(S, res, plan, k, band, nowT) {
+  const elapsed = Math.max(0, (nowT ?? S[k].t) - res.t0), used = res.used[k] ?? 0;
   const ideal = idealAh(plan, elapsed, res.laps.length), delta = used - ideal;
   const remainingMs = Math.max(0, plan.raceLenMs - elapsed);
-  // recent consumption: last 5 minutes
-  let j = k; while (j > res.i0 && s.t - S[j - 1].t <= 5 * 60e3) j--;
-  const span = s.t - S[j].t;
-  const recentA = span > 30e3 ? (((res.used[k] ?? 0) - (res.used[j] ?? 0)) / span) * 3.6e6 : null;
+  // recent consumption: last 5 minutes of the race
+  const from = Math.max(res.t0, S[k].t - 5 * 60e3);
+  let j = k; while (j > 0 && S[j - 1].t >= from) j--;
+  const span = S[k].t - S[j].t;
+  const recentA = span > 30e3 && res.used[j] != null ? ((used - res.used[j]) / span) * 3.6e6 : null;
   const lapsDone = res.laps.length;
   const lastLapEnd = lapsDone ? res.laps[lapsDone - 1].tb : null;
-  const usedAtLap = lastLapEnd != null ? lerpAt(S, res.used, lastLapEnd) - (res.bounds[0] ? lerpAt(S, res.used, res.bounds[0].t) : 0) : null;
+  const usedAtLap = lastLapEnd != null ? lerpAt(S, res.used, lastLapEnd) : null; // Ah used when the last lap ended
   return {
     elapsed, used, ideal, delta, remainingMs, recentA,
     call: delta > band ? 'slow' : delta < -band ? 'push' : 'hold',
     targetRestA: remainingMs > 60e3 ? ((plan.targetAh - used) / remainingMs) * 3.6e6 : null,
     projected: recentA != null ? used + (recentA * remainingMs) / 3.6e6 : null,
     lapsDone, nUsed: plan.model === 'tn' ? lapsDone + (plan.nMode === 'current' ? 1 : 0) : null,
-    deltaByLaps: usedAtLap != null ? usedAtLap - res.laps.reduce((sum, l) => sum + idealLapAh(plan, l.dur), 0) : null,
+    // Δ at the last lap line: the value to read with C(t, n), whose Δ swings within each lap
+    deltaByLaps: usedAtLap == null ? null : plan.model === 'ref'
+      ? usedAtLap - lerpAt(S, res.used, res.t0) - lapsDone * plan.perLap
+      : usedAtLap - idealAh(plan, lastLapEnd - res.t0, lapsDone),
     pctUsed: used / plan.targetAh,
   };
 }

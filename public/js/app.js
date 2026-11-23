@@ -2,6 +2,8 @@
 import * as M from './model.js';
 import { LineChart } from './charts.js';
 import { drawMap } from './map.js';
+import { LiveMap } from './livemap.js';
+import { createSync } from './sync.js';
 /* global io */
 
 const $ = (id) => document.getElementById(id);
@@ -11,15 +13,30 @@ const store = {
   del(k) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
 };
 
-// Ideal Ah: C(t, n) = 0.12 + 0.137t + 0.249n by default; C(t) = 0.14 + 0.2388t, or the reference-race rate
-// (1 Dec 2025: 33 laps, 149.070 s average, 20 Ah target) as alternatives.
-const DEFAULTS = {
-  idealModel: 'tn', tnA: 0.12, tnB: 0.137, tnC: 0.249, nMode: 'done', tA: 0.14, tB: 0.2388,
-  targetAh: 20, refLaps: 33, refLapMs: 149070, raceLenMin: null, bandAh: 0.2,
-  units: 'mph', theme: 'auto', lapSource: 'auto', liveStart: null, gate: null,
-  vWarn: 18, vCrit: 14, tWarn: 55, tCrit: 65, iWarn: 40, iCrit: 120, imbWarn: 0.5,
+// Per race class. F24: the team's C(t, n) = 0.12 + 0.137t + 0.249n and C(t) = 0.14 + 0.2388t, reference race
+// 1 Dec 2025 (33 laps, 149.070 s), aim 1.5 h. F24+: fitted to the 1 Dec 2025 F24+ log (26 laps, 144.155 s), aim 1 h.
+const CLASS_DEFAULTS = {
+  F24: { targetAh: 20, refLaps: 33, refLapMs: 149070, raceLenMin: 90, tnA: 0.12, tnB: 0.137, tnC: 0.249, tA: 0.14, tB: 0.2388 },
+  'F24+': { targetAh: 20, refLaps: 26, refLapMs: 144155, raceLenMin: 60, tnA: 1.684, tnB: 0.2385, tnC: 0.0956, tA: 1.3963, tB: 0.2811 },
 };
-let settings = { ...DEFAULTS, ...store.get('et.settings', {}) };
+const PER_CLASS = Object.keys(CLASS_DEFAULTS.F24);
+const DEFAULTS = {
+  cls: 'F24', idealModel: 'tn', nMode: 'done', bandAh: 0.2,
+  units: 'mph', theme: 'auto', lapSource: 'auto', gate: null,
+  vWarn: 18, vCrit: 14, tWarn: 55, tCrit: 65, iWarn: 40, iCrit: 120, imbWarn: 0.5,
+  rpmKmh: 89, rpmAt: 2400, rpmLo: 2200, rpmHi: 2500,
+};
+let settings = (() => {
+  const st = { ...DEFAULTS, ...store.get('et.settings', {}) };
+  const saved = st.classes || {};
+  st.classes = {};
+  for (const c of Object.keys(CLASS_DEFAULTS)) st.classes[c] = { ...CLASS_DEFAULTS[c], ...(saved[c] || {}) };
+  for (const k of PER_CLASS) delete st[k]; // older versions kept these at the top level
+  delete st.liveStart; // the race start is now shared between devices
+  if (!CLASS_DEFAULTS[st.cls]) st.cls = 'F24';
+  return st;
+})();
+const planSettings = () => ({ ...settings, ...settings.classes[settings.cls] });
 const saveSettings = () => store.set('et.settings', settings);
 
 // ---------- formatting ----------
@@ -40,11 +57,18 @@ const tod = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute:
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const U = (u) => (u ? `<span class="u">${u}</span>` : '');
 const idxAtOrBefore = (S, t) => { let lo = 0, hi = S.length - 1, r = 0; while (lo <= hi) { const m = (lo + hi) >> 1; if (S[m].t <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
+const rpmOf = (ms) => {
+  if (ms == null || !Number.isFinite(ms)) return null;
+  const kmh = ms * 3.6, f = (r) => (kmh * r) / settings.rpmKmh;
+  return { rpm: f(settings.rpmAt), lo: f(settings.rpmLo), hi: f(settings.rpmHi) };
+};
 const medianGap = (S, a, b) => { const g = []; for (let k = Math.max(a + 1, b - 200); k <= b; k++) g.push(S[k].t - S[k - 1].t); g.sort((x, y) => x - y); return g.length ? g[g.length >> 1] : 0; };
 
 // ---------- state ----------
 const live = { S: [], raw: [], status: 'idle', socket: null, server: null, carId: null, lastWall: 0, offset: 0, pollTimer: null, error: '', everConnected: false };
-const view = { mode: 'live', S: [], label: '', raceStart: null, gate: null, cursorT: null, playing: false, speed: 20, lastTick: 0 };
+const view = { mode: 'live', S: [], label: '', raceStart: null, manualLaps: [], gate: null, cursorT: null, playing: false, speed: 20, lastTick: 0 };
+const sync = createSync(() => onSync());
+let flashMsg = '', flashUntil = 0;
 let res = null, tab = 'race';
 
 const curS = () => (view.mode === 'live' ? live.S : view.S);
@@ -55,10 +79,12 @@ function nowIndex(S) {
   return S.length - 1;
 }
 function analysisOpts() {
-  const plan = M.makePlan(settings);
+  const plan = M.makePlan(planSettings());
   const base = { plan, lapSource: settings.lapSource, bandAh: settings.bandAh };
-  if (view.mode === 'live') return { ...base, raceStart: settings.liveStart, pick: 'latest', gate: settings.gate };
-  return { ...base, raceStart: view.raceStart, gate: view.gate, pick: view.mode === 'review' ? 'longest' : 'latest', nowT: view.mode === 'replay' ? view.cursorT : undefined };
+  if (view.mode === 'live') {
+    return { ...base, raceStart: sync.state.start, manualLaps: sync.state.laps.map((l) => l.t), wallNow: Date.now(), pick: 'latest', gate: settings.gate };
+  }
+  return { ...base, raceStart: view.raceStart, manualLaps: view.manualLaps.map((l) => l.t), gate: view.gate, pick: view.mode === 'review' ? 'longest' : 'latest', nowT: view.mode === 'replay' ? view.cursorT : undefined };
 }
 
 // ---------- rendering ----------
@@ -77,8 +103,9 @@ function invalidate() {
 function render() {
   const S = curS();
   res = S.length ? M.analyze(S, analysisOpts()) : null;
-  const plan = M.makePlan(settings), k = nowIndex(S);
+  const plan = M.makePlan(planSettings()), k = nowIndex(S);
   renderHeader();
+  renderRaceBar();
   if (tab === 'race') {
     renderNotice(S);
     renderPace(plan);
@@ -113,8 +140,10 @@ function renderHeader() {
     dot.className = 'dot';
     txt.textContent = view.mode === 'replay' ? `${view.label} · ${view.speed}×${view.playing ? '' : ' · paused'}` : `${view.label} · whole session`;
   }
+  // Live: real time since the shared race start, so every device shows the same clock.
   let el = null;
-  if (res?.t0 != null && k >= 0) el = view.mode === 'live' ? Date.now() + live.offset - res.t0 : S[k].t - res.t0;
+  const t0 = view.mode === 'live' ? (sync.state.start ?? res?.t0) : res?.t0;
+  if (t0 != null) el = view.mode === 'live' ? Date.now() - t0 : (k >= 0 ? S[k].t - t0 : null);
   $('raceClock').textContent = el == null ? '--:--' : clock(el);
 }
 
@@ -124,7 +153,8 @@ function renderNotice(S) {
   if (view.mode === 'live') {
     if (live.status === 'nocar') msg = 'Add your eChook Car ID in <b>Settings</b> to see live data.';
     else if (!S.length) msg = 'No data from the car yet today. This page updates by itself as soon as the eChook app starts sending. To try it now, open <b>Data &amp; replay</b> and replay a past race.';
-    else if (res && res.t0 == null) msg = 'The car has not driven off yet. The race clock starts by itself when it does, or press <b>Race starts now</b> in Settings.';
+    else if (res && res.t0 == null) msg = 'The car has not driven off yet. Press <b>Start race</b> at the start so every device uses the same clock.';
+    else if (sync.state.start == null && res?.t0 != null) msg = 'The race start was detected from the car driving off. Press <b>Start race</b> to pin it for every device.';
   }
   n.hidden = !msg; n.innerHTML = msg;
 }
@@ -163,6 +193,7 @@ function renderPace(plan) {
 
 function lapSourceText(S) {
   if (!res?.lapSource) return '';
+  if (res.lapSource === 'manual') return 'marked by hand';
   const gap = res.i0 != null ? medianGap(S, res.i0, res.i1) : 0;
   const src = res.lapSource === 'counter' ? 'eChook lap counter' : 'GPS start/finish line';
   return gap > 1500 ? `${src} · ±${Math.round(gap / 1000)} s (data every ${Math.round(gap / 1000)} s)` : src;
@@ -185,7 +216,7 @@ function renderLastLap(S, plan) {
     ['Lowest voltage', `${fx(L.minV, 2)}${U('V')}`],
     ['Average speed', `${fx(spd(L.avgSpd), 1)}${U(spdUnit())}`],
     ['Average GPS speed', `${fx(spd(L.avgGspd), 1)}${U(spdUnit())}`],
-    ['Average RPM', fx(L.avgRpm, 0)],
+    ['Average motor RPM', fx(rpmOf(L.avgSpd ?? L.avgGspd)?.rpm, 0)],
     ['Energy', `${fx(L.wh, 1)}${U('Wh')}`],
   ];
   if (L.device) items.push(['eChook lap time', `${fx(L.device.time, 1)}${U('s')}`]);
@@ -209,9 +240,9 @@ function renderTiles(S, k) {
     if (q.brake != null) { if (q.brake) { brakeNever = false; break; } brakeNever = true; }
   }
   const imb = s.vUp != null && s.vLo != null ? s.vUp - s.vLo : null;
-  const sensorOff = s.gspd != null && s.gspd > 3 && (s.spd == null || s.spd < 0.5);
+  const sensorOff = s.gspd != null && s.gspd > 3 && s.spd != null && s.spd < 0.5;
   const T = [
-    ['Speed (wheel)', fx(spd(s.spd), 1), spdUnit(), sensorOff ? ['warn', '⚠ Check'] : null, sensorOff ? 'GPS says the car is moving' : ''],
+    ['Speed (eChook)', fx(spd(s.spd), 1), spdUnit(), sensorOff ? ['warn', '⚠ Check'] : null, sensorOff ? 'GPS says the car is moving' : ''],
     ['GPS speed', fx(spd(s.gspd), 1), spdUnit()],
     ['Current', fx(s.i, 1), 'A', s.i == null ? null : s.i >= st.iCrit ? ['crit', '⛔ High'] : s.i >= st.iWarn ? ['warn', '⚠ High'] : null],
     ['Power', fx(s.pw, 0), 'W'],
@@ -219,13 +250,14 @@ function renderTiles(S, k) {
     ['Lower battery', fx(s.vLo, 2), 'V'],
     ['Upper battery', fx(s.vUp, 2), 'V', null, 'pack − lower'],
     ['Battery imbalance', signed(imb, 2), 'V', imb != null && Math.abs(imb) >= st.imbWarn ? ['warn', '⚠ Check'] : null, 'upper − lower'],
-    ['Motor RPM', fx(s.rpm, 0), ''],
+    (() => { const r = rpmOf(s.spd ?? s.gspd); return ['Motor RPM', r ? fx(r.rpm, 0) : '–', 'rpm', null, r ? `range ${fx(r.lo, 0)}–${fx(r.hi, 0)} · from ${s.spd != null ? 'eChook' : 'GPS'} speed` : '']; })(),
     ['Throttle', fx(s.thr, 0), '%'],
     ['Gear ratio', fx(s.gear, 2), '', null, 'motor ÷ wheel speed'],
     ['Temperature 1', fx(s.t1, 1), '°C', s.t1 == null ? null : s.t1 >= st.tCrit ? ['crit', '⛔ Hot'] : s.t1 >= st.tWarn ? ['warn', '⚠ Hot'] : null],
     ['Temperature 2', fx(s.t2, 1), '°C', s.t2 == null ? null : s.t2 >= st.tCrit ? ['crit', '⛔ Hot'] : s.t2 >= st.tWarn ? ['warn', '⚠ Hot'] : null, t2Zero ? 'always 0: sensor not connected?' : ''],
     ['Brake', s.brake == null ? '–' : s.brake ? 'ON' : 'off', '', null, brakeNever ? 'never on: switch not wired?' : ''],
-    ['Ah used (race)', fx(usedRace, 2), 'Ah', null, `eChook counter ${fx(s.ah, 2)} Ah`],
+    ['Ah used (race)', fx(usedRace, 2), 'Ah', null, usedRace != null ? 'since the race start' : 'starts with the race'],
+    (() => { const e = res?.echook?.[k] ?? s.ah; return ['eChook Ah counter', fx(e, 2), 'Ah', null, e != null && s.ah != null && Math.abs(e - s.ah) > 0.005 ? `includes ${fx(e - s.ah, 2)} Ah from before an app restart` : 'as eChook shows it']; })(),
     ['Energy used (race)', fx(whRace, 0), 'Wh'],
     ['eChook lap counter', s.lap == null ? '–' : String(s.lap), '', null, s.track ? esc(s.track) : ''],
     ['GPS position', s.lat == null ? '–' : `${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}`, '', null, tod(s.t)],
@@ -280,7 +312,7 @@ function renderRaceCharts(S, plan, k) {
   const [a, b] = w;
   chart('chDelta', { series: [{ label: 'Δ Ah' }], unit: 'Ah', dp: 2, delta: true, band: bandFn, height: 200 })
     .setData(columns(S, a, b, [deltaAt(plan)]));
-  chart('chSpeedR', { series: [{ label: 'Wheel', color: '--s1' }, { label: 'GPS', color: '--s2' }], unit: spdUnit, dp: 1, height: 200 })
+  chart('chSpeedR', { series: [{ label: 'eChook', color: '--s1' }, { label: 'GPS', color: '--s2' }], unit: spdUnit, dp: 1, height: 200 })
     .setData(columns(S, a, b, [(s) => spd(s.spd), (s) => spd(s.gspd)]));
   chart('chCurrentR', { series: [{ label: 'Current', color: '--s1' }], unit: 'A', dp: 1, height: 200 })
     .setData(columns(S, a, b, [(s) => s.i]));
@@ -290,12 +322,12 @@ function renderRaceCharts(S, plan, k) {
 const GRAPHS = [
   { id: 'gUsed', title: 'Ah used vs ideal', unit: 'Ah', dp: 2, series: [{ label: 'Used', color: '--s1' }, { label: 'Ideal', color: '--s2', dash: [6, 4] }], cols: (plan) => [(s, j) => usedAt(j), idealAt(plan)] },
   { id: 'gDelta', title: 'Δ Ah vs ideal', unit: 'Ah', dp: 2, delta: true, series: [{ label: 'Δ Ah' }], cols: (plan) => [deltaAt(plan)] },
-  { id: 'gSpeed', title: 'Speed', unit: spdUnit, dp: 1, series: [{ label: 'Wheel', color: '--s1' }, { label: 'GPS', color: '--s2' }], cols: () => [(s) => spd(s.spd), (s) => spd(s.gspd)] },
+  { id: 'gSpeed', title: 'Speed', unit: spdUnit, dp: 1, series: [{ label: 'eChook', color: '--s1' }, { label: 'GPS', color: '--s2' }], cols: () => [(s) => spd(s.spd), (s) => spd(s.gspd)] },
   { id: 'gCurrent', title: 'Current', unit: 'A', dp: 1, series: [{ label: 'Current', color: '--s1' }], cols: () => [(s) => s.i] },
   { id: 'gPower', title: 'Power', unit: 'W', dp: 0, series: [{ label: 'Power', color: '--s1' }], cols: () => [(s) => s.pw] },
   { id: 'gBatt', title: 'Battery voltages', unit: 'V', dp: 2, series: [{ label: 'Lower', color: '--s1' }, { label: 'Upper', color: '--s2' }], cols: () => [(s) => s.vLo, (s) => s.vUp] },
   { id: 'gPack', title: 'Pack voltage', unit: 'V', dp: 2, series: [{ label: 'Pack', color: '--s1' }], cols: () => [(s) => s.v] },
-  { id: 'gRpm', title: 'Motor RPM', unit: 'rpm', dp: 0, series: [{ label: 'RPM', color: '--s1' }], cols: () => [(s) => s.rpm] },
+  { id: 'gRpm', title: 'Motor RPM (from speed)', unit: 'rpm', dp: 0, series: [{ label: 'RPM', color: '--s1' }, { label: 'Low', color: '--s2', dash: [5, 4] }, { label: 'High', color: '--s3', dash: [5, 4] }], cols: () => [(s) => rpmOf(s.spd ?? s.gspd)?.rpm ?? null, (s) => rpmOf(s.spd ?? s.gspd)?.lo ?? null, (s) => rpmOf(s.spd ?? s.gspd)?.hi ?? null] },
   { id: 'gThr', title: 'Throttle', unit: '%', dp: 0, series: [{ label: 'Throttle', color: '--s1' }], cols: () => [(s) => s.thr] },
   { id: 'gTemp', title: 'Temperature', unit: '°C', dp: 1, series: [{ label: 'Temp 1', color: '--s1' }, { label: 'Temp 2', color: '--s2' }], cols: () => [(s) => s.t1, (s) => s.t2] },
 ];
@@ -314,11 +346,30 @@ function renderGraphs(S, plan, k) {
   }
 }
 
+const liveMap = new LiveMap($('map'), {
+  describe: (p) => {
+    const r = rpmOf(p.spd ?? p.gspd);
+    return `<b>${tod(p.t)}</b><br>Speed ${fx(spd(p.spd ?? p.gspd), 1)} ${spdUnit()}${r ? ` · ${fx(r.rpm, 0)} rpm` : ''}<br>` +
+      `Current ${fx(p.i, 1)} A · Pack ${fx(p.v, 2)} V<br>Ah ${fx(p.ah, 2)}${p.lap != null ? ` · eChook lap ${p.lap}` : ''}`;
+  },
+});
+let mapCanvas = null;
 function renderMap(S, k) {
   if (k < 0) return;
   const from = res?.i0 ?? idxAtOrBefore(S, S[k].t - 10 * 60e3);
-  const note = drawMap($('map'), S, { from, to: k, lapFrom: res?.bounds?.at(-1)?.t ?? null, gate: res?.lapSource === 'gps' ? res.gate : null });
-  $('mapNote').textContent = note ? `${note} · blue = current lap · dashed = start/finish` : '';
+  const pts = [];
+  let last = null;
+  for (let j = from; j <= k; j++) {
+    const s = S[j];
+    if (s.lat == null || s.lon == null || (last && last.lat === s.lat && last.lon === s.lon)) continue;
+    pts.push(s); last = s;
+  }
+  const gate = res?.lapSource === 'gps' ? res.gate : null, lapFrom = res?.bounds?.at(-1)?.t ?? null;
+  if (!liveMap.update(pts, lapFrom, gate)) { // map library missing: plain drawing instead
+    if (!mapCanvas) { mapCanvas = document.createElement('canvas'); mapCanvas.className = 'map'; $('map').replaceChildren(mapCanvas); }
+    drawMap(mapCanvas, S, { from, to: k, lapFrom, gate });
+  }
+  $('mapNote').textContent = pts.length ? 'Blue = current lap · click the track for readings · ◎ follows the car' : 'No GPS track yet';
 }
 
 function renderLaps(table, S, plan, k, max) {
@@ -341,7 +392,7 @@ function renderLaps(table, S, plan, k, max) {
       `<td class="${dcls(L.dur - plan.refLapMs)}">${signed((L.dur - plan.refLapMs) / 1000, 1)} s</td>` +
       `<td>${fx(L.ah, 3)}</td><td class="${dcls(L.ahDelta)}">${signed(L.ahDelta, 3)}</td>` +
       `<td>${fx(L.avgI, 1)}</td><td>${fx(L.peakI, 0)}</td><td>${fx(L.avgV, 2)}</td><td>${fx(L.minV, 2)}</td>` +
-      `<td>${fx(spd(L.avgSpd), 1)}</td><td>${fx(spd(L.avgGspd), 1)}</td><td>${fx(L.avgRpm, 0)}</td><td>${fx(L.avgThr, 0)}</td>` +
+      `<td>${fx(spd(L.avgSpd), 1)}</td><td>${fx(spd(L.avgGspd), 1)}</td><td>${fx(rpmOf(L.avgSpd ?? L.avgGspd)?.rpm, 0)}</td><td>${fx(L.avgThr, 0)}</td>` +
       `<td>${fx(L.wh, 1)}</td><td>${fx(L.maxT, 1)}</td></tr>`);
   }
   table.innerHTML = `<thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody>`;
@@ -349,6 +400,7 @@ function renderLaps(table, S, plan, k, max) {
 
 // ---------- settings ----------
 const FIELDS = [
+  ['sCls', 'cls', String], ['sRpmKmh', 'rpmKmh', Number], ['sRpmAt', 'rpmAt', Number], ['sRpmLo', 'rpmLo', Number], ['sRpmHi', 'rpmHi', Number],
   ['sModel', 'idealModel', String], ['sNMode', 'nMode', String],
   ['sTnA', 'tnA', Number], ['sTnB', 'tnB', Number], ['sTnC', 'tnC', Number], ['sTA', 'tA', Number], ['sTB', 'tB', Number],
   ['sTarget', 'targetAh', Number], ['sRefLaps', 'refLaps', Number],
@@ -359,7 +411,7 @@ const FIELDS = [
   ['sIw', 'iWarn', Number], ['sIc', 'iCrit', Number], ['sImb', 'imbWarn', Number],
 ];
 function fillSettings() {
-  for (const [id, key, , show] of FIELDS) $(id).value = show ? show(settings[key]) : settings[key];
+  for (const [id, key, , show] of FIELDS) { const src = PER_CLASS.includes(key) ? settings.classes[settings.cls] : settings; $(id).value = show ? show(src[key]) : src[key]; }
   syncModelRows();
   renderPlanOut();
 }
@@ -367,7 +419,7 @@ function syncModelRows() {
   document.querySelectorAll('[data-model]').forEach((el) => { el.hidden = !el.dataset.model.split(' ').includes(settings.idealModel); });
 }
 function renderPlanOut() {
-  const p = M.makePlan(settings);
+  const p = M.makePlan(planSettings());
   if (p.model !== 'ref') {
     const lapMin = p.refLapMs / 60000;
     const rows = [
@@ -385,7 +437,7 @@ function renderPlanOut() {
   const rows = [
     ['Ah per lap', `${fx(p.targetAh, 1)} ÷ ${p.refLaps} = ${p.perLap.toFixed(4)} Ah`],
     ['Average lap', `${(p.refLapMs / 1000).toFixed(3)} s = ${p.refLapMs} ms`],
-    ['Race length the plan covers', `${clock(p.raceLenMs)}${settings.raceLenMin ? ' (set)' : ` (${p.refLaps} × ${(p.refLapMs / 1000).toFixed(3)} s)`}`],
+    ['Race length the plan covers', `${clock(p.raceLenMs)}${planSettings().raceLenMin ? ' (aim for this class)' : ` (${p.refLaps} × ${(p.refLapMs / 1000).toFixed(3)} s)`}`],
     ['Ah per minute', `${p.perMin.toFixed(5)} Ah`],
     ['Ah per second', `${p.perS.toFixed(7)} Ah`],
     ['Ah per millisecond', `${p.perMs.toExponential(5).replace('e-6', ' × 10⁻⁶').replace('e-7', ' × 10⁻⁷')} Ah`],
@@ -394,12 +446,12 @@ function renderPlanOut() {
   $('planOut').innerHTML = rows.map(([a, b]) => `<span>${a}</span><b>${b}</b>`).join('');
 }
 function renderSettingsInfo(S) {
-  const isLive = view.mode === 'live', manual = isLive ? settings.liveStart : view.raceStart;
-  const t0 = res?.t0;
+  const isLive = view.mode === 'live', manual = isLive ? sync.state.start : view.raceStart;
+  const t0 = isLive ? (sync.state.start ?? res?.t0) : res?.t0;
   $('startNote').textContent = t0 == null
     ? 'No race start yet. It is detected when the car drives off after standing still for 5 minutes, or set it here.'
     : `Race start: ${new Date(t0).toLocaleString()} (${manual != null ? 'set by hand' : 'detected: the car drove off'}). ` +
-      (manual == null ? 'A stop longer than 5 minutes would start a new race, so press “Race starts now” at the start to pin it.' : '');
+      (manual == null ? 'A stop longer than 5 minutes would start a new race, so press “Race starts now” at the start to pin it for every device.' : (isLive ? 'Shared with every device.' : ''));
   const g = (isLive ? settings.gate : view.gate);
   $('gateNote').textContent = g ? `Start/finish line set by hand at ${g.lat.toFixed(5)}, ${g.lon.toFixed(5)}. It is only used when laps are counted with GPS.`
     : 'GPS start/finish line: placed where the car drives off at the race start. Used when the eChook lap counter is not counting.';
@@ -489,6 +541,7 @@ async function initLive() {
   renderCarIdCard();
   for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k?.startsWith('et.live.') && k !== dayKey()) store.del(k); }
   if (!live.carId) { live.status = 'nocar'; invalidate(); loadDays(); return; }
+  sync.start(live.carId);
   await backfill();
   connect();
   loadDays();
@@ -538,7 +591,8 @@ $('csvFile').addEventListener('change', async (e) => {
 });
 
 function setLoaded(S, label) {
-  view.S = S; view.label = label; view.raceStart = null; view.gate = null;
+  view.S = S; view.label = label; view.raceStart = null; view.gate = null; view.manualLaps = [];
+  liveMap.resetView();
   $('refResult').hidden = true;
   enterMode('review');
   renderLoaded();
@@ -573,18 +627,18 @@ $('btnReplay').onclick = () => {
   selectTab('race');
 };
 $('btnRef').onclick = () => {
-  const r = M.referenceFrom(view.S, settings.targetAh);
+  const r = M.referenceFrom(view.S, planSettings().targetAh);
   const box = $('refResult'); box.hidden = false;
   if (!r.ok) { box.innerHTML = 'No complete laps found in this data.'; return; }
   const src = r.res.lapSource === 'counter' ? 'the eChook lap counter' : 'GPS (start/finish line where the car drove off)';
   box.innerHTML = `<b>${r.laps} complete laps</b> in the longest driving stretch (laps counted with ${src}).<br>` +
-    `Average lap ${(r.avgLapMs / 1000).toFixed(3)} s · ${fx(settings.targetAh, 1)} Ah ÷ ${r.laps} = <b>${r.perLap.toFixed(4)} Ah per lap</b> · ` +
+    `Average lap ${(r.avgLapMs / 1000).toFixed(3)} s · ${fx(planSettings().targetAh, 1)} Ah ÷ ${r.laps} = <b>${r.perLap.toFixed(4)} Ah per lap</b> · ` +
     `${r.perS.toFixed(7)} Ah per second · ${(r.perMs * 1e6).toFixed(5)} × 10⁻⁶ Ah per ms (a steady ${(r.perMs * 3.6e6).toFixed(2)} A).<br>` +
     `<span class="muted">Actually used over those laps: ${fx(r.res.used[r.res.i1], 2)} Ah.</span>` +
-    `<br><span class="muted">Applying them sets the reference-race model (one of the ideal Ah choices in Settings) and the race length used for “hold for the rest”.</span>` +
+    `<br><span class="muted">Applying them sets the reference race for ${settings.cls} (used by the reference-race model and the lap time comparison).</span>` +
     `<div class="row"><button class="btn primary" id="btnApplyRef">Use these numbers</button></div>`;
   $('btnApplyRef').onclick = () => {
-    Object.assign(settings, { refLaps: r.laps, refLapMs: Math.round(r.avgLapMs), raceLenMin: null });
+    Object.assign(settings.classes[settings.cls], { refLaps: r.laps, refLapMs: Math.round(r.avgLapMs) });
     saveSettings(); fillSettings(); invalidate();
     $('btnApplyRef').textContent = 'Applied ✓';
   };
@@ -618,35 +672,116 @@ $('rpPlay').onclick = () => {
 };
 $('rpSpeed').onchange = (e) => { view.speed = Number(e.target.value); invalidate(); };
 $('rpSeek').oninput = (e) => { const S = view.S; view.cursorT = S[0].t + (Number(e.target.value) / 1000) * (S.at(-1).t - S[0].t); invalidate(); };
-$('rpLive').onclick = () => { enterMode('live'); };
+$('rpLive').onclick = () => { liveMap.resetView(); enterMode('live'); };
 
 // ---------- settings events ----------
 for (const [id, key, parse] of FIELDS) {
   $(id).addEventListener('change', (e) => {
     const v = parse(e.target.value);
     if (typeof v === 'number' && !Number.isFinite(v)) return;
-    settings[key] = v; saveSettings();
+    if (PER_CLASS.includes(key)) settings.classes[settings.cls][key] = v; else settings[key] = v;
+    saveSettings();
+    if (key === 'cls') { setClass(v); return; }
+    if (key === 'idealModel' && view.mode === 'live') sync.publish({ k: 'model', v });
     if (key === 'theme') applyTheme();
     if (key === 'idealModel') syncModelRows();
     if (key === 'units') Object.values(charts).forEach((c) => c.rebuild());
     renderPlanOut(); invalidate();
   });
 }
-$('btnStartNow').onclick = () => {
-  if (view.mode === 'live') { settings.liveStart = Date.now() + live.offset; saveSettings(); }
-  else view.raceStart = view.mode === 'replay' ? view.cursorT : view.raceStart;
+// ---------- race control: start, laps, class (shared with every device in live mode) ----------
+function startRace(t) {
+  if (view.mode === 'live') sync.publish({ k: 'start', t });
+  else { view.raceStart = t; view.manualLaps = []; }
   invalidate();
+}
+function raceRunning() {
+  return view.mode === 'live' ? sync.state.start != null && Date.now() - sync.state.start < 4 * 3600e3 : view.raceStart != null;
+}
+$('btnStartRace').onclick = () => {
+  if (view.mode === 'review') return flash('Start the replay first, then press Start race at the right moment.');
+  if (raceRunning() && !confirm('Restart the race clock? This resets the race and its marked laps on every device.')) return;
+  startRace(view.mode === 'replay' ? view.cursorT : Date.now());
 };
-$('btnStartAuto').onclick = () => {
-  if (view.mode === 'live') { settings.liveStart = null; saveSettings(); } else view.raceStart = null;
-  $('sStartAt').value = ''; invalidate();
-};
+$('btnStartNow').onclick = () => $('btnStartRace').onclick();
+$('btnStartAuto').onclick = () => { startRace(null); $('sStartAt').value = ''; };
 $('sStartAt').onchange = (e) => {
   const t = Date.parse(e.target.value);
-  if (!Number.isFinite(t)) return;
-  if (view.mode === 'live') { settings.liveStart = t; saveSettings(); } else view.raceStart = t;
+  if (Number.isFinite(t)) startRace(t);
+};
+const lapList = () => (view.mode === 'live' ? sync.state.laps : view.manualLaps);
+const raceStartNow = () => (view.mode === 'live' ? sync.state.start : view.raceStart) ?? res?.t0 ?? null;
+function markLap() {
+  if (view.mode === 'review') return flash('Laps can be marked live or during a replay.');
+  const t = view.mode === 'live' ? Date.now() : view.cursorT, start = raceStartNow();
+  if (start == null) return flash('Start the race first.');
+  const last = lapList().filter((l) => l.t > start).at(-1);
+  if (last && t - last.t < 10e3) return flash(`Ignored: a lap was marked ${Math.round((t - last.t) / 1000)} s ago.`);
+  if (view.mode === 'live') {
+    if (sync.state.start == null) sync.publish({ k: 'start', t: start }); // pin the detected start for every device
+    sync.publish({ k: 'lap', t });
+  } else {
+    view.raceStart ??= start;
+    view.manualLaps.push({ id: 'l' + t, t });
+  }
+  flash(`Lap marked at ${tod(t)}.`);
+  invalidate();
+}
+function undoLap() {
+  const start = raceStartNow(), last = lapList().filter((l) => start == null || l.t > start).at(-1);
+  if (!last) return flash('No marked lap to undo.');
+  if (view.mode === 'live') sync.publish({ k: 'unlap', id: last.id });
+  else view.manualLaps = view.manualLaps.filter((l) => l !== last);
+  flash(`Removed the lap marked at ${tod(last.t)}.`);
+  invalidate();
+}
+$('btnLap').onclick = markLap;
+$('btnUndoLap').onclick = undoLap;
+$('btnAutoLaps').onclick = () => {
+  if (!confirm('Delete the laps marked by hand and count laps automatically again?')) return;
+  if (view.mode === 'live') sync.publish({ k: 'autolaps' }); else view.manualLaps = [];
   invalidate();
 };
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+  const tag = e.target?.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.target?.isContentEditable) return;
+  if (e.key === 'l' || e.key === 'L') { e.preventDefault(); markLap(); }
+  else if (e.key === 'u' || e.key === 'U') { e.preventDefault(); undoLap(); }
+});
+function setClass(c) {
+  if (!CLASS_DEFAULTS[c]) return;
+  settings.cls = c; saveSettings();
+  if (view.mode === 'live') sync.publish({ k: 'class', v: c });
+  fillSettings(); invalidate();
+}
+$('clsSel').onchange = (e) => setClass(e.target.value);
+function onSync() {
+  const st = sync.state;
+  let changed = false;
+  if (st.cls && CLASS_DEFAULTS[st.cls] && st.cls !== settings.cls) { settings.cls = st.cls; changed = true; }
+  if (st.model && st.model !== settings.idealModel) { settings.idealModel = st.model; changed = true; }
+  if (changed) { saveSettings(); fillSettings(); }
+  invalidate();
+}
+function flash(msg) {
+  flashMsg = msg; flashUntil = Date.now() + 4000;
+  renderRaceBar(); setTimeout(renderRaceBar, 4100);
+}
+function renderRaceBar() {
+  $('clsSel').value = settings.cls;
+  $('btnAutoLaps').hidden = res?.lapSource !== 'manual';
+  $('btnStartRace').textContent = raceRunning() ? 'Restart race' : 'Start race';
+  let note = res?.lapSource === 'manual' ? 'Laps marked by hand: automatic lap counting is off for this race.'
+    : res?.lapSource ? `Laps counted automatically (${res.lapSource === 'counter' ? 'eChook lap counter' : 'GPS line'}). Pressing Lap switches to marking by hand.` : '';
+  if (flashMsg && Date.now() < flashUntil) note = flashMsg;
+  $('raceBarNote').textContent = note;
+  const sn = $('syncNote');
+  if (view.mode !== 'live') { sn.textContent = 'Replay: start and laps stay on this device'; sn.className = 'small syncnote'; return; }
+  const st = sync.state.status;
+  sn.textContent = st === 'ok' ? '● Shared with your other devices' : st === 'connecting' ? '○ Connecting…' : st === 'offline' ? '● Not shared right now: this device only (retrying)' : '';
+  sn.className = 'small syncnote ' + (st === 'ok' ? 'ok' : st === 'offline' ? 'off' : '');
+}
 $('btnGateHere').onclick = () => {
   const S = curS(), k = nowIndex(S);
   let b = null, a = null;
@@ -690,5 +825,5 @@ let firstTab = 'race';
 try { firstTab = sessionStorage.getItem('et.tab') || 'race'; } catch { /* ignore */ }
 selectTab(firstTab);
 setInterval(() => { if (view.mode === 'live') { renderHeader(); } }, 1000);
-setInterval(() => { if (view.mode === 'live' && live.S.length) invalidate(); }, 5000);
+setInterval(() => { if (view.mode === 'live') invalidate(); }, 2000);
 initLive();

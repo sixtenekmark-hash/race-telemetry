@@ -52,6 +52,37 @@ The **Hold for the rest** figure is the steady current that would use exactly th
 
 **Data & replay → Use as pacing reference** redoes steps 2–5 from any race log.
 
+## Race day controls (Race tab)
+
+- **Start race** starts the race clock at once. The start, any laps marked by hand, the race class
+  and the ideal model are **shared with every device that has the Car ID**, so all of them show the
+  same clock and laps. A device that was closed catches up when it opens again.
+  - The sharing goes through ntfy.sh, a free message relay that keeps messages for 12 hours. The
+    channel name is a one-way hash of the Car ID, so the Car ID itself is never sent.
+  - Only these small events are shared, never telemetry.
+- **Lap** (key **L**) marks a lap at the line, for when GPS lap counting is unreliable.
+  - As soon as one lap is marked by hand, automatic lap counting is off for that race.
+  - **Undo lap** (key **U**) removes the last marked lap. A second press within 10 s is ignored.
+  - **Back to automatic laps** deletes the hand-marked laps.
+- **F24 / F24+** switches the race class. Each class has its own numbers in Settings:
+
+  | | F24 | F24+ |
+  |---|---|---|
+  | Aim (race length) | 1.5 h | 1 h |
+  | Reference race (1 Dec 2025) | 33 laps, 149.070 s | 26 laps, 144.155 s |
+  | C(t, n) | 0.12 + 0.137t + 0.249n (the team's) | 1.684 + 0.2385t + 0.0956n (fitted to the F24+ log) |
+  | C(t) | 0.14 + 0.2388t (the team's) | 1.3963 + 0.2811t (fitted to the F24+ log) |
+
+- **Ah used (race)** counts from the race start and resets when the race is restarted. It is worked
+  out from the eChook's own amp-hour counter, and the pace call uses it.
+- **eChook Ah counter** shows the eChook's own total, exactly as eChook shows it. If the phone app
+  restarts mid-race and the counter falls back to zero, the earlier total is carried over.
+- **Motor RPM** is worked out from the eChook speed reading: 89 km/h = 2400 rpm (range 2200–2500),
+  and 0 km/h = 0 rpm. If the eChook speed is missing, GPS speed is used instead. The calibration is
+  in Settings.
+- **The map** can zoom and pan, and switches between satellite and street maps. Click the track to
+  see the readings at that point. ◎ follows the car and ⤢ shows the whole track.
+
 ## Last lap summary
 
 The eChook's own last-lap fields (`LL_Time`, `LL_Ah`, …) arrive empty in every packet, even in

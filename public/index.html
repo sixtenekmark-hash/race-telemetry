@@ -7,6 +7,7 @@
   <meta name="description" content="Live eChook telemetry and energy pacing for the race car">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M7 21a9 9 0 0 1 18 0' fill='none' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3Cpath d='M16 21l5-6' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="vendor/uPlot.min.css">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -46,6 +47,15 @@
 <main>
   <!-- RACE -->
   <section id="tab-race" class="tab" role="tabpanel">
+    <div class="racebar card">
+      <select id="clsSel" class="btn" aria-label="Race class"><option value="F24">F24</option><option value="F24+">F24+</option></select>
+      <button id="btnStartRace" class="btn primary">Start race</button>
+      <button id="btnLap" class="btn lapbtn" title="Keyboard: L">Lap <kbd>L</kbd></button>
+      <button id="btnUndoLap" class="btn" title="Keyboard: U">Undo lap <kbd>U</kbd></button>
+      <button id="btnAutoLaps" class="btn" hidden>Back to automatic laps</button>
+      <span id="raceBarNote" class="muted small"></span>
+      <span id="syncNote" class="small syncnote"></span>
+    </div>
     <div id="notice" class="notice" hidden></div>
     <div class="hero">
       <article id="paceCard" class="card pace">
@@ -73,7 +83,7 @@
           <div><dt>Projected at finish</dt><dd id="stProj">–</dd></div>
           <div><dt>Ideal per average lap</dt><dd id="stPerLap">–</dd></div>
           <div><dt>Laps done</dt><dd id="stLaps">–</dd></div>
-          <div><dt>Δ by laps (same track only)</dt><dd id="stByLaps">–</dd></div>
+          <div><dt>Δ at the last lap line</dt><dd id="stByLaps">–</dd></div>
         </dl>
       </article>
 
@@ -93,7 +103,7 @@
       </article>
       <article class="card">
         <div class="card-head"><h3>Track</h3><span id="mapNote" class="muted small"></span></div>
-        <canvas id="map" class="map" aria-label="GPS track with the car's position"></canvas>
+        <div id="map" class="map" aria-label="Map of the track with the car's position"></div>
       </article>
       <article class="card">
         <div class="card-head"><h3>Speed</h3><span class="muted small unitLabel"></span></div>
@@ -157,6 +167,8 @@
       <article class="card">
         <div class="card-head"><h3>Energy plan</h3></div>
         <div class="form">
+          <label>Race class <span><select id="sCls"><option value="F24">F24 (aim 1.5 h)</option><option value="F24+">F24+ (aim 1 h)</option></select></span></label>
+          <p class="muted small">The class, race start, laps and ideal model are shared with every device. The numbers below belong to the selected class.</p>
           <label>Ideal Ah model
             <select id="sModel">
               <option value="tn">C(t, n): time and laps</option>
@@ -200,6 +212,7 @@
       <article class="card">
         <div class="card-head"><h3>Display &amp; warnings</h3></div>
         <div class="form">
+          <div class="coef">Motor RPM: <input id="sRpmKmh" type="number" step="any" aria-label="km/h"> km/h = <input id="sRpmAt" type="number" step="any" aria-label="rpm"> rpm (range <input id="sRpmLo" type="number" step="any" aria-label="low rpm"> – <input id="sRpmHi" type="number" step="any" aria-label="high rpm">), 0 km/h = 0 rpm</div>
           <label>Speed unit <select id="sUnits"><option value="mph">mph</option><option value="kmh">km/h</option><option value="ms">m/s</option></select></label>
           <label>Theme <select id="sTheme"><option value="auto">Match device</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
           <label>Pack voltage warning / critical below <span><input id="sVw" type="number" step="0.1"> / <input id="sVc" type="number" step="0.1"> V</span></label>
@@ -222,6 +235,7 @@
 
 <script src="vendor/uPlot.iife.min.js"></script>
 <script src="vendor/socket.io.min.js"></script>
+<script src="vendor/leaflet/leaflet.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
