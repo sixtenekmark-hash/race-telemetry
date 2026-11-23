@@ -24,6 +24,7 @@ const DEFAULTS = {
   cls: 'F24', idealModel: 'tn', nMode: 'done', bandAh: 0.2,
   units: 'mph', theme: 'auto', lapSource: 'auto', gate: null,
   vWarn: 18, vCrit: 14, tWarn: 55, tCrit: 65, iWarn: 40, iCrit: 120, imbWarn: 0.5,
+  rpmMode: 'exact', rpmRadius: 0.25, rpmMagnets: 1,
   rpmKmh: 89, rpmAt: 2400, rpmLo: 2200, rpmHi: 2500,
 };
 let settings = (() => {
@@ -57,10 +58,19 @@ const tod = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute:
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const U = (u) => (u ? `<span class="u">${u}</span>` : '');
 const idxAtOrBefore = (S, t) => { let lo = 0, hi = S.length - 1, r = 0; while (lo <= hi) { const m = (lo + hi) >> 1; if (S[m].t <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
-const rpmOf = (ms) => {
-  if (ms == null || !Number.isFinite(ms)) return null;
-  const kmh = ms * 3.6, f = (r) => (kmh * r) / settings.rpmKmh;
-  return { rpm: f(settings.rpmAt), lo: f(settings.rpmLo), hi: f(settings.rpmHi) };
+// Motor RPM from speed. 'exact': the eChook's speed input counts the motor magnet, so the eChook speed (m/s) is
+// motor turns per second × 2π × wheel radius ÷ magnets. Only the eChook speed can be used: GPS speed is the car's
+// real speed, which doesn't give the motor's. 'cal': the earlier rule (89 km/h = 2400 rpm, with a range).
+const ok = (v) => v != null && Number.isFinite(v);
+const rpmOf = (ms, gms) => {
+  if (settings.rpmMode === 'exact') {
+    if (!ok(ms) || !(settings.rpmRadius > 0)) return null;
+    return { rpm: (ms * 60 * settings.rpmMagnets) / (2 * Math.PI * settings.rpmRadius), lo: null, hi: null, src: 'eChook', exact: true };
+  }
+  const v = ok(ms) ? ms : gms;
+  if (!ok(v)) return null;
+  const kmh = v * 3.6, f = (r) => (kmh * r) / settings.rpmKmh;
+  return { rpm: f(settings.rpmAt), lo: f(settings.rpmLo), hi: f(settings.rpmHi), src: ok(ms) ? 'eChook' : 'GPS' };
 };
 const medianGap = (S, a, b) => { const g = []; for (let k = Math.max(a + 1, b - 200); k <= b; k++) g.push(S[k].t - S[k - 1].t); g.sort((x, y) => x - y); return g.length ? g[g.length >> 1] : 0; };
 
@@ -216,7 +226,7 @@ function renderLastLap(S, plan) {
     ['Lowest voltage', `${fx(L.minV, 2)}${U('V')}`],
     ['Average speed', `${fx(spd(L.avgSpd), 1)}${U(spdUnit())}`],
     ['Average GPS speed', `${fx(spd(L.avgGspd), 1)}${U(spdUnit())}`],
-    ['Average motor RPM', fx(rpmOf(L.avgSpd ?? L.avgGspd)?.rpm, 0)],
+    ['Average motor RPM', fx(rpmOf(L.avgSpd, L.avgGspd)?.rpm, 0)],
     ['Energy', `${fx(L.wh, 1)}${U('Wh')}`],
   ];
   if (L.device) items.push(['eChook lap time', `${fx(L.device.time, 1)}${U('s')}`]);
@@ -250,7 +260,13 @@ function renderTiles(S, k) {
     ['Lower battery', fx(s.vLo, 2), 'V'],
     ['Upper battery', fx(s.vUp, 2), 'V', null, 'pack − lower'],
     ['Battery imbalance', signed(imb, 2), 'V', imb != null && Math.abs(imb) >= st.imbWarn ? ['warn', '⚠ Check'] : null, 'upper − lower'],
-    (() => { const r = rpmOf(s.spd ?? s.gspd); return ['Motor RPM', r ? fx(r.rpm, 0) : '–', 'rpm', null, r ? `range ${fx(r.lo, 0)}–${fx(r.hi, 0)} · from ${s.spd != null ? 'eChook' : 'GPS'} speed` : '']; })(),
+    (() => {
+      const r = rpmOf(s.spd, s.gspd);
+      const note = !r ? (settings.rpmMode === 'exact' ? 'needs the eChook speed' : '')
+        : r.exact ? `from eChook speed · ${fx(settings.rpmRadius * 100, 1)} cm wheel, ${settings.rpmMagnets} magnet${settings.rpmMagnets === 1 ? '' : 's'}`
+        : `range ${fx(r.lo, 0)}–${fx(r.hi, 0)} · from ${r.src} speed`;
+      return ['Motor RPM', r ? fx(r.rpm, 0) : '–', 'rpm', null, note];
+    })(),
     ['Throttle', fx(s.thr, 0), '%'],
     ['Gear ratio', fx(s.gear, 2), '', null, 'motor ÷ wheel speed'],
     ['Temperature 1', fx(s.t1, 1), '°C', s.t1 == null ? null : s.t1 >= st.tCrit ? ['crit', '⛔ Hot'] : s.t1 >= st.tWarn ? ['warn', '⚠ Hot'] : null],
@@ -327,7 +343,7 @@ const GRAPHS = [
   { id: 'gPower', title: 'Power', unit: 'W', dp: 0, series: [{ label: 'Power', color: '--s1' }], cols: () => [(s) => s.pw] },
   { id: 'gBatt', title: 'Battery voltages', unit: 'V', dp: 2, series: [{ label: 'Lower', color: '--s1' }, { label: 'Upper', color: '--s2' }], cols: () => [(s) => s.vLo, (s) => s.vUp] },
   { id: 'gPack', title: 'Pack voltage', unit: 'V', dp: 2, series: [{ label: 'Pack', color: '--s1' }], cols: () => [(s) => s.v] },
-  { id: 'gRpm', title: 'Motor RPM (from speed)', unit: 'rpm', dp: 0, series: [{ label: 'RPM', color: '--s1' }, { label: 'Low', color: '--s2', dash: [5, 4] }, { label: 'High', color: '--s3', dash: [5, 4] }], cols: () => [(s) => rpmOf(s.spd ?? s.gspd)?.rpm ?? null, (s) => rpmOf(s.spd ?? s.gspd)?.lo ?? null, (s) => rpmOf(s.spd ?? s.gspd)?.hi ?? null] },
+  { id: 'gRpm', title: 'Motor RPM (from speed)', unit: 'rpm', dp: 0, series: [{ label: 'RPM', color: '--s1' }, { label: 'Low', color: '--s2', dash: [5, 4] }, { label: 'High', color: '--s3', dash: [5, 4] }], cols: () => [(s) => rpmOf(s.spd, s.gspd)?.rpm ?? null, (s) => rpmOf(s.spd, s.gspd)?.lo ?? null, (s) => rpmOf(s.spd, s.gspd)?.hi ?? null] },
   { id: 'gThr', title: 'Throttle', unit: '%', dp: 0, series: [{ label: 'Throttle', color: '--s1' }], cols: () => [(s) => s.thr] },
   { id: 'gTemp', title: 'Temperature', unit: '°C', dp: 1, series: [{ label: 'Temp 1', color: '--s1' }, { label: 'Temp 2', color: '--s2' }], cols: () => [(s) => s.t1, (s) => s.t2] },
 ];
@@ -348,7 +364,7 @@ function renderGraphs(S, plan, k) {
 
 const liveMap = new LiveMap($('map'), {
   describe: (p) => {
-    const r = rpmOf(p.spd ?? p.gspd);
+    const r = rpmOf(p.spd, p.gspd);
     return `<b>${tod(p.t)}</b><br>Speed ${fx(spd(p.spd ?? p.gspd), 1)} ${spdUnit()}${r ? ` · ${fx(r.rpm, 0)} rpm` : ''}<br>` +
       `Current ${fx(p.i, 1)} A · Pack ${fx(p.v, 2)} V<br>Ah ${fx(p.ah, 2)}${p.lap != null ? ` · eChook lap ${p.lap}` : ''}`;
   },
@@ -392,7 +408,7 @@ function renderLaps(table, S, plan, k, max) {
       `<td class="${dcls(L.dur - plan.refLapMs)}">${signed((L.dur - plan.refLapMs) / 1000, 1)} s</td>` +
       `<td>${fx(L.ah, 3)}</td><td class="${dcls(L.ahDelta)}">${signed(L.ahDelta, 3)}</td>` +
       `<td>${fx(L.avgI, 1)}</td><td>${fx(L.peakI, 0)}</td><td>${fx(L.avgV, 2)}</td><td>${fx(L.minV, 2)}</td>` +
-      `<td>${fx(spd(L.avgSpd), 1)}</td><td>${fx(spd(L.avgGspd), 1)}</td><td>${fx(rpmOf(L.avgSpd ?? L.avgGspd)?.rpm, 0)}</td><td>${fx(L.avgThr, 0)}</td>` +
+      `<td>${fx(spd(L.avgSpd), 1)}</td><td>${fx(spd(L.avgGspd), 1)}</td><td>${fx(rpmOf(L.avgSpd, L.avgGspd)?.rpm, 0)}</td><td>${fx(L.avgThr, 0)}</td>` +
       `<td>${fx(L.wh, 1)}</td><td>${fx(L.maxT, 1)}</td></tr>`);
   }
   table.innerHTML = `<thead><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody>`;
@@ -400,7 +416,7 @@ function renderLaps(table, S, plan, k, max) {
 
 // ---------- settings ----------
 const FIELDS = [
-  ['sCls', 'cls', String], ['sRpmKmh', 'rpmKmh', Number], ['sRpmAt', 'rpmAt', Number], ['sRpmLo', 'rpmLo', Number], ['sRpmHi', 'rpmHi', Number],
+  ['sCls', 'cls', String], ['sRpmMode', 'rpmMode', String], ['sRpmR', 'rpmRadius', Number], ['sRpmMag', 'rpmMagnets', Number], ['sRpmKmh', 'rpmKmh', Number], ['sRpmAt', 'rpmAt', Number], ['sRpmLo', 'rpmLo', Number], ['sRpmHi', 'rpmHi', Number],
   ['sModel', 'idealModel', String], ['sNMode', 'nMode', String],
   ['sTnA', 'tnA', Number], ['sTnB', 'tnB', Number], ['sTnC', 'tnC', Number], ['sTA', 'tA', Number], ['sTB', 'tB', Number],
   ['sTarget', 'targetAh', Number], ['sRefLaps', 'refLaps', Number],
@@ -412,8 +428,11 @@ const FIELDS = [
 ];
 function fillSettings() {
   for (const [id, key, , show] of FIELDS) { const src = PER_CLASS.includes(key) ? settings.classes[settings.cls] : settings; $(id).value = show ? show(src[key]) : src[key]; }
-  syncModelRows();
+  syncModelRows(); syncRpmRows();
   renderPlanOut();
+}
+function syncRpmRows() {
+  document.querySelectorAll('[data-rpm]').forEach((el) => { el.hidden = el.dataset.rpm !== settings.rpmMode; });
 }
 function syncModelRows() {
   document.querySelectorAll('[data-model]').forEach((el) => { el.hidden = !el.dataset.model.split(' ').includes(settings.idealModel); });
@@ -685,6 +704,7 @@ for (const [id, key, parse] of FIELDS) {
     if (key === 'idealModel' && view.mode === 'live') sync.publish({ k: 'model', v });
     if (key === 'theme') applyTheme();
     if (key === 'idealModel') syncModelRows();
+    if (key === 'rpmMode') syncRpmRows();
     if (key === 'units') Object.values(charts).forEach((c) => c.rebuild());
     renderPlanOut(); invalidate();
   });

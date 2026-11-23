@@ -212,7 +212,9 @@
       <article class="card">
         <div class="card-head"><h3>Display &amp; warnings</h3></div>
         <div class="form">
-          <div class="coef">Motor RPM: <input id="sRpmKmh" type="number" step="any" aria-label="km/h"> km/h = <input id="sRpmAt" type="number" step="any" aria-label="rpm"> rpm (range <input id="sRpmLo" type="number" step="any" aria-label="low rpm"> – <input id="sRpmHi" type="number" step="any" aria-label="high rpm">), 0 km/h = 0 rpm</div>
+          <label>Motor RPM <select id="sRpmMode"><option value="exact">Exact, from wheel radius and magnets</option><option value="cal">From a speed = rpm rule, with a range</option></select></label>
+          <div class="coef" data-rpm="exact">Wheel radius <input id="sRpmR" type="number" step="any" aria-label="wheel radius in metres"> m, magnets on the motor <input id="sRpmMag" type="number" step="1" min="1" aria-label="motor magnets">: RPM = eChook speed (m/s) × 60 × magnets ÷ (2π × radius)</div>
+          <div class="coef" data-rpm="cal"><input id="sRpmKmh" type="number" step="any" aria-label="km/h"> km/h = <input id="sRpmAt" type="number" step="any" aria-label="rpm"> rpm (range <input id="sRpmLo" type="number" step="any" aria-label="low rpm"> – <input id="sRpmHi" type="number" step="any" aria-label="high rpm">), 0 km/h = 0 rpm</div>
           <label>Speed unit <select id="sUnits"><option value="mph">mph</option><option value="kmh">km/h</option><option value="ms">m/s</option></select></label>
           <label>Theme <select id="sTheme"><option value="auto">Match device</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
           <label>Pack voltage warning / critical below <span><input id="sVw" type="number" step="0.1"> / <input id="sVc" type="number" step="0.1"> V</span></label>
