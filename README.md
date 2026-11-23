@@ -79,13 +79,15 @@ The **Hold for the rest** figure is the steady current that would use exactly th
   restarts mid-race and the counter falls back to zero, the earlier total is carried over.
 - **Motor RPM** is worked out exactly from the eChook speed reading.
   - The eChook's speed input counts the magnet on the motor shaft. The eChook turns that into a speed
-    using the wheel size, so the speed it reports is motor turns per second × 2π × wheel radius ÷ magnets.
-  - The site works backwards: RPM = eChook speed (m/s) × 60 × magnets ÷ (2π × wheel radius). With a
-    25 cm wheel radius and 1 magnet, that is speed in m/s × 38.2, or speed in km/h × 10.6.
+    using its own circumference and magnet settings, so the speed it reports is motor turns per second ×
+    circumference ÷ magnets.
+  - The site works backwards with the same settings: RPM = eChook speed (m/s) × 60 × magnets ÷
+    circumference. With the factory circumference of 1.178 m and 1 magnet, that is speed in m/s × 50.9,
+    or speed in km/h × 14.1 (89 km/h ≈ 1259 rpm).
+  - The circumference and magnets in Settings must match what is set in the eChook, not the real wheel.
   - Only the eChook speed can be used for this. GPS speed is the car's real speed, which doesn't say how
     fast the motor turns.
-  - The wheel radius and magnet count are in Settings. The earlier rule (89 km/h = 2400 rpm, range
-    2200–2500) can still be chosen there.
+  - The earlier rule (89 km/h = 2400 rpm, range 2200–2500) can still be chosen in Settings.
 - **The map** can zoom and pan, and switches between satellite and street maps. Click the track to
   see the readings at that point. ◎ follows the car and ⤢ shows the whole track.
 

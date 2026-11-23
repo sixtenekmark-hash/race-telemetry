@@ -24,7 +24,7 @@ const DEFAULTS = {
   cls: 'F24', idealModel: 'tn', nMode: 'done', bandAh: 0.2,
   units: 'mph', theme: 'auto', lapSource: 'auto', gate: null,
   vWarn: 18, vCrit: 14, tWarn: 55, tCrit: 65, iWarn: 40, iCrit: 120, imbWarn: 0.5,
-  rpmMode: 'exact', rpmRadius: 0.25, rpmMagnets: 1,
+  rpmMode: 'exact', rpmCirc: 1.178, rpmMagnets: 1,
   rpmKmh: 89, rpmAt: 2400, rpmLo: 2200, rpmHi: 2500,
 };
 let settings = (() => {
@@ -33,6 +33,7 @@ let settings = (() => {
   st.classes = {};
   for (const c of Object.keys(CLASS_DEFAULTS)) st.classes[c] = { ...CLASS_DEFAULTS[c], ...(saved[c] || {}) };
   for (const k of PER_CLASS) delete st[k]; // older versions kept these at the top level
+  delete st.rpmRadius; // replaced by rpmCirc (the eChook's own circumference setting)
   delete st.liveStart; // the race start is now shared between devices
   if (!CLASS_DEFAULTS[st.cls]) st.cls = 'F24';
   return st;
@@ -59,13 +60,13 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 const U = (u) => (u ? `<span class="u">${u}</span>` : '');
 const idxAtOrBefore = (S, t) => { let lo = 0, hi = S.length - 1, r = 0; while (lo <= hi) { const m = (lo + hi) >> 1; if (S[m].t <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; };
 // Motor RPM from speed. 'exact': the eChook's speed input counts the motor magnet, so the eChook speed (m/s) is
-// motor turns per second × 2π × wheel radius ÷ magnets. Only the eChook speed can be used: GPS speed is the car's
+// motor turns per second × the eChook's circumference setting (factory 1.178 m) ÷ its magnet setting. Only the eChook speed can be used: GPS speed is the car's
 // real speed, which doesn't give the motor's. 'cal': the earlier rule (89 km/h = 2400 rpm, with a range).
 const ok = (v) => v != null && Number.isFinite(v);
 const rpmOf = (ms, gms) => {
   if (settings.rpmMode === 'exact') {
-    if (!ok(ms) || !(settings.rpmRadius > 0)) return null;
-    return { rpm: (ms * 60 * settings.rpmMagnets) / (2 * Math.PI * settings.rpmRadius), lo: null, hi: null, src: 'eChook', exact: true };
+    if (!ok(ms) || !(settings.rpmCirc > 0)) return null;
+    return { rpm: (ms * 60 * settings.rpmMagnets) / settings.rpmCirc, lo: null, hi: null, src: 'eChook', exact: true };
   }
   const v = ok(ms) ? ms : gms;
   if (!ok(v)) return null;
@@ -263,7 +264,7 @@ function renderTiles(S, k) {
     (() => {
       const r = rpmOf(s.spd, s.gspd);
       const note = !r ? (settings.rpmMode === 'exact' ? 'needs the eChook speed' : '')
-        : r.exact ? `from eChook speed · ${fx(settings.rpmRadius * 100, 1)} cm wheel, ${settings.rpmMagnets} magnet${settings.rpmMagnets === 1 ? '' : 's'}`
+        : r.exact ? `from eChook speed · ${fx(settings.rpmCirc, 3)} m circumference, ${settings.rpmMagnets} magnet${settings.rpmMagnets === 1 ? '' : 's'}`
         : `range ${fx(r.lo, 0)}–${fx(r.hi, 0)} · from ${r.src} speed`;
       return ['Motor RPM', r ? fx(r.rpm, 0) : '–', 'rpm', null, note];
     })(),
@@ -416,7 +417,7 @@ function renderLaps(table, S, plan, k, max) {
 
 // ---------- settings ----------
 const FIELDS = [
-  ['sCls', 'cls', String], ['sRpmMode', 'rpmMode', String], ['sRpmR', 'rpmRadius', Number], ['sRpmMag', 'rpmMagnets', Number], ['sRpmKmh', 'rpmKmh', Number], ['sRpmAt', 'rpmAt', Number], ['sRpmLo', 'rpmLo', Number], ['sRpmHi', 'rpmHi', Number],
+  ['sCls', 'cls', String], ['sRpmMode', 'rpmMode', String], ['sRpmC', 'rpmCirc', Number], ['sRpmMag', 'rpmMagnets', Number], ['sRpmKmh', 'rpmKmh', Number], ['sRpmAt', 'rpmAt', Number], ['sRpmLo', 'rpmLo', Number], ['sRpmHi', 'rpmHi', Number],
   ['sModel', 'idealModel', String], ['sNMode', 'nMode', String],
   ['sTnA', 'tnA', Number], ['sTnB', 'tnB', Number], ['sTnC', 'tnC', Number], ['sTA', 'tA', Number], ['sTB', 'tB', Number],
   ['sTarget', 'targetAh', Number], ['sRefLaps', 'refLaps', Number],
