@@ -77,17 +77,13 @@ The **Hold for the rest** figure is the steady current that would use exactly th
   out from the eChook's own amp-hour counter, and the pace call uses it.
 - **eChook Ah counter** shows the eChook's own total, exactly as eChook shows it. If the phone app
   restarts mid-race and the counter falls back to zero, the earlier total is carried over.
-- **Motor RPM** is worked out exactly from the eChook speed reading.
-  - The eChook's speed input counts the magnet on the motor shaft. The eChook turns that into a speed
-    using its own circumference and magnet settings, so the speed it reports is motor turns per second ×
-    circumference ÷ magnets.
-  - The site works backwards with the same settings: RPM = eChook speed (m/s) × 60 × magnets ÷
-    circumference. With the factory circumference of 1.178 m and 1 magnet, that is speed in m/s × 50.9,
-    or speed in km/h × 14.1 (89 km/h ≈ 1259 rpm).
-  - The circumference and magnets in Settings must match what is set in the eChook, not the real wheel.
-  - Only the eChook speed can be used for this. GPS speed is the car's real speed, which doesn't say how
-    fast the motor turns.
-  - The earlier rule (89 km/h = 2400 rpm, range 2200–2500) can still be chosen in Settings.
+- **Motor RPM** is the eChook's own RPM sensor reading. The tile, graph, map, last lap and laps table
+  all use it.
+  - Settings can instead work RPM out from the eChook speed, for when the RPM sensor isn't working:
+    - **Exact:** RPM = eChook speed (m/s) × 60 × magnets ÷ circumference, using the circumference and
+      magnets set in the eChook (factory circumference 1.178 m). This assumes the speed input counts the
+      motor magnet.
+    - **Rule:** 89 km/h = 2400 rpm (range 2200–2500), 0 km/h = 0 rpm.
 - **The map** can zoom and pan, and switches between satellite and street maps. Click the track to
   see the readings at that point. ◎ follows the car and ⤢ shows the whole track.
 
